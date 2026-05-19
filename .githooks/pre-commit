@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+echo "=== Running Git Pre-Commit Hooks ==="
+
+echo "1. Checking formatting..."
+cargo fmt -- --check
+
+echo "2. Running Clippy..."
+cargo clippy --all-targets --all-features -- -D warnings
+
+echo "3. Running cargo test..."
+cargo test --all-targets --all-features
+
+echo "=== All checks passed! ==="

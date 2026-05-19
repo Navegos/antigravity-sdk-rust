@@ -1,0 +1,52 @@
+[package]
+name = "antigravity-sdk-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+prost = "0.12"
+pbjson = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
+futures-util = "0.3"
+
+[build-dependencies]
+prost-build = "0.12"
+pbjson-build = "0.6"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+# Enforce correctness and styles (groups need priority set to allow overrides)
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -2 }
+nursery = { level = "warn", priority = -3 }
+
+# Prevent panics and placeholders in production
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "warn"
+panic = "deny"
+
+# Allow specific pedantic lints that are too verbose / restrictive
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+# Let type_complexity slide where generated proto bindings or complex callbacks dictate it
+type_complexity = "allow"
+
+

@@ -1,0 +1,982 @@
+use crate::connection::Connection;
+use crate::hooks::HookRunner;
+use crate::proto::localharness::{
+    FileEditToolConfig, FilesystemWorkspace, FindToolConfig, GeminiConfig as ProtoGeminiConfig,
+    GenerateImageToolConfig, GrepSearchToolConfig, HarnessConfig, HarnessSideTools,
+    InitializeConversationEvent, InputConfig, InputEvent, ListDirToolConfig, MultipleChoiceAnswer,
+    OutputConfig, OutputEvent, RunCommandToolConfig, SubagentsConfig,
+    SystemInstructions as ProtoSystemInstructions, Tool as ProtoTool, ToolConfirmation,
+    ToolResponse, UserQuestionAnswer, UserQuestionsConfig, UserQuestionsResponse,
+    ViewFileToolConfig, Workspace as ProtoWorkspace, WriteToFileToolConfig,
+    appended_system_instructions::Section, custom_system_instructions::Part,
+    user_questions_response::QuestionsResponse, workspace::WorkspaceType,
+};
+use crate::tools::ToolRunner;
+use crate::types::{
+    AskQuestionEntry, AskQuestionOption, BuiltinTools, CapabilitiesConfig, GeminiConfig,
+    QuestionHookResult, Step, StepSource, StepStatus, StepTarget, StepType, SystemInstructions,
+    ToolCall, ToolResult, UsageMetadata,
+};
+
+use anyhow::anyhow;
+use async_trait::async_trait;
+use futures_util::stream::{self, BoxStream};
+use futures_util::{SinkExt, StreamExt};
+use prost::Message;
+use serde_json::Value;
+use std::collections::HashSet;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+#[allow(dead_code)]
+pub struct LocalConnection {
+    conversation_id: String,
+    process: Arc<Mutex<tokio::process::Child>>,
+    is_idle: Arc<AtomicBool>,
+    step_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<Result<Step, anyhow::Error>>>>>,
+    ws_tx: UnboundedSender<String>,
+    tool_runner: Option<ToolRunner>,
+    hook_runner: Option<HookRunner>,
+    parent_idle: Arc<Mutex<bool>>,
+    active_subagent_ids: Arc<Mutex<HashSet<String>>>,
+    step_trackers: Arc<Mutex<HashSet<(String, u32)>>>,
+}
+
+impl std::fmt::Debug for LocalConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalConnection")
+            .field("conversation_id", &self.conversation_id)
+            .field("is_idle", &self.is_idle)
+            .field("tool_runner", &self.tool_runner)
+            .field("hook_runner", &self.hook_runner)
+            .field("parent_idle", &self.parent_idle)
+            .field("active_subagent_ids", &self.active_subagent_ids)
+            .field("step_trackers", &self.step_trackers)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl Connection for LocalConnection {
+    fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+
+    fn is_idle(&self) -> bool {
+        self.is_idle.load(Ordering::SeqCst)
+    }
+
+    fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
+        let step_rx = self.step_rx.clone();
+        stream::unfold((), move |()| {
+            let step_rx = step_rx.clone();
+            async move {
+                let mut guard = step_rx.lock().await;
+                if let Some(ref mut rx) = *guard {
+                    rx.recv().await.map(|step| (step, ()))
+                } else {
+                    None
+                }
+            }
+        })
+        .boxed()
+    }
+
+    async fn send(&self, content: &str) -> Result<(), anyhow::Error> {
+        let input_event = InputEvent {
+            event: Some(crate::proto::localharness::input_event::Event::UserInput(
+                content.to_string(),
+            )),
+        };
+        let raw_json = serde_json::to_string(&input_event)?;
+        self.ws_tx.send(raw_json)?;
+        Ok(())
+    }
+
+    async fn send_trigger_notification(&self, content: &str) -> Result<(), anyhow::Error> {
+        let input_event = InputEvent {
+            event: Some(
+                crate::proto::localharness::input_event::Event::AutomatedTrigger(
+                    content.to_string(),
+                ),
+            ),
+        };
+        let raw_json = serde_json::to_string(&input_event)?;
+        self.ws_tx.send(raw_json)?;
+        Ok(())
+    }
+
+    async fn send_halt_request(&self) -> Result<(), anyhow::Error> {
+        let input_event = InputEvent {
+            event: Some(crate::proto::localharness::input_event::Event::HaltRequest(
+                true,
+            )),
+        };
+        let raw_json = serde_json::to_string(&input_event)?;
+        self.ws_tx.send(raw_json)?;
+        Ok(())
+    }
+
+    async fn send_tool_confirmation(
+        &self,
+        trajectory_id: &str,
+        step_index: u32,
+        accepted: bool,
+    ) -> Result<(), anyhow::Error> {
+        let conf = ToolConfirmation {
+            trajectory_id: Some(trajectory_id.to_string()),
+            step_index: Some(step_index),
+            accepted: Some(accepted),
+        };
+        let input_event = InputEvent {
+            event: Some(crate::proto::localharness::input_event::Event::ToolConfirmation(conf)),
+        };
+        let raw_json = serde_json::to_string(&input_event)?;
+        self.ws_tx.send(raw_json)?;
+        Ok(())
+    }
+
+    async fn send_tool_response(&self, id: &str, result: ToolResult) -> Result<(), anyhow::Error> {
+        let resp_json = if let Some(ref val) = result.result {
+            serde_json::to_string(val)?
+        } else if let Some(ref err) = result.error {
+            serde_json::to_string(&serde_json::json!({ "error": err }))?
+        } else {
+            "{}".to_string()
+        };
+
+        let resp = ToolResponse {
+            id: Some(id.to_string()),
+            response_json: Some(resp_json),
+            supplemental_media: Vec::new(),
+            response: None,
+        };
+        let input_event = InputEvent {
+            event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
+        };
+        let raw_json = serde_json::to_string(&input_event)?;
+        self.ws_tx.send(raw_json)?;
+        Ok(())
+    }
+
+    async fn send_question_response(
+        &self,
+        trajectory_id: &str,
+        step_index: u32,
+        answers: QuestionHookResult,
+    ) -> Result<(), anyhow::Error> {
+        let mut proto_answers = Vec::new();
+        for r in answers.responses {
+            if r.skipped {
+                proto_answers.push(UserQuestionAnswer {
+                    answer: Some(
+                        crate::proto::localharness::user_question_answer::Answer::Unanswered(true),
+                    ),
+                });
+            } else {
+                let mut mc_ans = MultipleChoiceAnswer {
+                    selected_choice_indices: Vec::new(),
+                    freeform_response: Some(r.freeform_response.clone()),
+                };
+                if let Some(ref opts) = r.selected_option_ids {
+                    for opt in opts {
+                        if let Ok(idx) = opt.parse::<i32>() {
+                            mc_ans.selected_choice_indices.push(idx - 1);
+                        }
+                    }
+                }
+                proto_answers.push(UserQuestionAnswer {
+                    answer: Some(crate::proto::localharness::user_question_answer::Answer::MultipleChoiceAnswer(mc_ans)),
+                });
+            }
+        }
+
+        let resp = UserQuestionsResponse {
+            trajectory_id: Some(trajectory_id.to_string()),
+            step_index: Some(step_index),
+            result: Some(if answers.cancelled {
+                crate::proto::localharness::user_questions_response::Result::Cancelled(true)
+            } else {
+                crate::proto::localharness::user_questions_response::Result::Response(
+                    QuestionsResponse {
+                        answers: proto_answers,
+                    },
+                )
+            }),
+        };
+
+        let input_event = InputEvent {
+            event: Some(crate::proto::localharness::input_event::Event::QuestionResponse(resp)),
+        };
+        let raw_json = serde_json::to_string(&input_event)?;
+        self.ws_tx.send(raw_json)?;
+        Ok(())
+    }
+
+    async fn disconnect(&self) -> Result<(), anyhow::Error> {
+        let mut proc = self.process.lock().await;
+        let _ = proc.kill().await;
+        drop(proc);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct LocalConnectionStrategy {
+    pub binary_path: String,
+    pub gemini_config: GeminiConfig,
+    pub capabilities_config: CapabilitiesConfig,
+    pub system_instructions: Option<SystemInstructions>,
+    pub save_dir: Option<String>,
+    pub workspaces: Vec<String>,
+    pub skills_paths: Vec<String>,
+    pub tool_runner: Option<ToolRunner>,
+    pub hook_runner: Option<HookRunner>,
+    pub conversation_id: String,
+}
+
+impl LocalConnectionStrategy {
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        binary_path: String,
+        gemini_config: GeminiConfig,
+        capabilities_config: CapabilitiesConfig,
+        system_instructions: Option<SystemInstructions>,
+        save_dir: Option<String>,
+        workspaces: Vec<String>,
+        skills_paths: Vec<String>,
+        tool_runner: Option<ToolRunner>,
+        hook_runner: Option<HookRunner>,
+        conversation_id: String,
+    ) -> Self {
+        Self {
+            binary_path,
+            gemini_config,
+            capabilities_config,
+            system_instructions,
+            save_dir,
+            workspaces,
+            skills_paths,
+            tool_runner,
+            hook_runner,
+            conversation_id,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub async fn connect(&self) -> Result<LocalConnection, anyhow::Error> {
+        let api_key = self
+            .gemini_config
+            .models
+            .default
+            .api_key
+            .clone()
+            .or_else(|| self.gemini_config.api_key.clone())
+            .or_else(|| std::env::var("GEMINI_API_KEY").ok());
+
+        let api_key = api_key.ok_or_else(|| {
+            anyhow!(
+                "A Gemini API key is required. Set it via GeminiConfig or GEMINI_API_KEY env var."
+            )
+        })?;
+
+        // 1. Spawning localharness subprocess
+        let mut child = Command::new(&self.binary_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let mut child_stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open child stdin"))?;
+        let mut child_stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open child stdout"))?;
+        let child_stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("Failed to open child stderr"))?;
+
+        // 2. Perform Handshake via length-prefixed protocol buffer over stdin/stdout
+        let input_config = InputConfig {
+            storage_directory: self.save_dir.clone(),
+            port: None,
+            bind_address: None,
+        };
+
+        let mut input_buf = Vec::new();
+        input_config.encode(&mut input_buf)?;
+
+        let size = input_buf.len() as u32;
+        child_stdin.write_all(&size.to_le_bytes()).await?;
+        child_stdin.write_all(&input_buf).await?;
+        child_stdin.flush().await?;
+
+        let mut size_bytes = [0u8; 4];
+        child_stdout.read_exact(&mut size_bytes).await?;
+        let length = u32::from_le_bytes(size_bytes) as usize;
+        let mut output_buf = vec![0u8; length];
+        child_stdout.read_exact(&mut output_buf).await?;
+        let output_config = OutputConfig::decode(&output_buf[..])?;
+
+        let port = output_config
+            .port
+            .ok_or_else(|| anyhow!("Harness OutputConfig missing port"))?;
+        let harness_api_key = output_config
+            .api_key
+            .ok_or_else(|| anyhow!("Harness OutputConfig missing api_key"))?;
+
+        // 3. Setup WebSocket connection
+        let ws_url = format!("ws://localhost:{port}/");
+        let mut req = ws_url.clone().into_client_request()?;
+        req.headers_mut()
+            .insert("x-goog-api-key", harness_api_key.parse()?);
+
+        // Connect with retry/backoff
+        let mut ws_stream = None;
+        let mut delay = std::time::Duration::from_millis(100);
+        for attempt in 0..5 {
+            match connect_async(req.clone()).await {
+                Ok((stream, _)) => {
+                    ws_stream = Some(stream);
+                    break;
+                }
+                Err(e) => {
+                    if attempt == 4 {
+                        let _ = child.kill().await;
+                        return Err(anyhow!("Failed to connect to WS at {ws_url}: {e:?}"));
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+            }
+        }
+
+        let ws = ws_stream.ok_or_else(|| anyhow!("Failed to connect to WS"))?;
+        let (mut ws_write, mut ws_read) = ws.split();
+
+        // 4. Build HarnessConfig proto
+        let mut proto_tools = Vec::new();
+        if let Some(ref runner) = self.tool_runner {
+            let tools = runner.tools.read().await;
+            for t in tools.values() {
+                proto_tools.push(ProtoTool {
+                    name: Some(t.name().to_string()),
+                    description: Some(t.description().to_string()),
+                    parameters_json_schema: Some(t.parameters_json_schema().to_string()),
+                    response_json_schema: None,
+                });
+            }
+        }
+
+        let proto_sys = self.system_instructions.as_ref().map(|sys| match sys {
+            SystemInstructions::Custom(custom) => {
+                let instr_part = Part {
+                    part: Some(
+                        crate::proto::localharness::custom_system_instructions::part::Part::Text(
+                            custom.text.clone(),
+                        ),
+                    ),
+                };
+                ProtoSystemInstructions {
+                    r#type: Some(
+                        crate::proto::localharness::system_instructions::Type::Custom(
+                            crate::proto::localharness::CustomSystemInstructions {
+                                part: vec![instr_part],
+                            },
+                        ),
+                    ),
+                }
+            }
+            SystemInstructions::Appended(appended) => {
+                let mut sections = Vec::new();
+                for sec in &appended.appended_sections {
+                    sections.push(Section {
+                        title: Some(sec.title.clone()),
+                        content: Some(sec.content.clone()),
+                    });
+                }
+                ProtoSystemInstructions {
+                    r#type: Some(
+                        crate::proto::localharness::system_instructions::Type::Appended(
+                            crate::proto::localharness::AppendedSystemInstructions {
+                                custom_identity: appended.custom_identity.clone(),
+                                appended_sections: sections,
+                            },
+                        ),
+                    ),
+                }
+            }
+        });
+
+        let proto_gemini = ProtoGeminiConfig {
+            api_key: Some(api_key),
+            base_url: None,
+            model_name: Some(self.gemini_config.models.default.name.clone()),
+            thinking_level: self
+                .gemini_config
+                .models
+                .default
+                .generation
+                .thinking_level
+                .map(|l| match l {
+                    crate::types::ThinkingLevel::Minimal => "minimal".to_string(),
+                    crate::types::ThinkingLevel::Low => "low".to_string(),
+                    crate::types::ThinkingLevel::Medium => "medium".to_string(),
+                    crate::types::ThinkingLevel::High => "high".to_string(),
+                }),
+            enable_url_context: None,
+            enable_google_search: None,
+        };
+
+        let mut proto_workspaces = Vec::new();
+        for w in &self.workspaces {
+            proto_workspaces.push(ProtoWorkspace {
+                workspace_type: Some(WorkspaceType::FilesystemWorkspace(FilesystemWorkspace {
+                    directory: Some(w.clone()),
+                })),
+            });
+        }
+
+        let all_tools = vec![
+            BuiltinTools::CreateFile,
+            BuiltinTools::EditFile,
+            BuiltinTools::FindFile,
+            BuiltinTools::ListDir,
+            BuiltinTools::RunCommand,
+            BuiltinTools::SearchDir,
+            BuiltinTools::ViewFile,
+            BuiltinTools::StartSubagent,
+            BuiltinTools::GenerateImage,
+            BuiltinTools::Finish,
+        ];
+        let active_tools: HashSet<BuiltinTools> =
+            self.capabilities_config.enabled_tools.as_ref().map_or_else(
+                || {
+                    if let Some(ref disabled) = self.capabilities_config.disabled_tools {
+                        let disabled_set: HashSet<BuiltinTools> =
+                            disabled.iter().copied().collect();
+                        all_tools
+                            .into_iter()
+                            .filter(|t| !disabled_set.contains(t))
+                            .collect()
+                    } else {
+                        all_tools.into_iter().collect()
+                    }
+                },
+                |enabled| enabled.iter().copied().collect(),
+            );
+
+        let side_tools = HarnessSideTools {
+            find: Some(FindToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::FindFile)),
+            }),
+            run_command: Some(RunCommandToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::RunCommand)),
+            }),
+            subagents: Some(SubagentsConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::StartSubagent)),
+            }),
+            user_questions: Some(UserQuestionsConfig {
+                enabled: Some(true),
+            }),
+            file_edit: Some(FileEditToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::EditFile)),
+            }),
+            view_file: Some(ViewFileToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::ViewFile)),
+            }),
+            write_to_file: Some(WriteToFileToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::CreateFile)),
+            }),
+            grep_search: Some(GrepSearchToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::SearchDir)),
+            }),
+            list_dir: Some(ListDirToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::ListDir)),
+            }),
+            permissions: None,
+            generate_image: Some(GenerateImageToolConfig {
+                enabled: Some(active_tools.contains(&BuiltinTools::GenerateImage)),
+                model_name: self.capabilities_config.image_model.clone(),
+            }),
+        };
+
+        let harness_config = HarnessConfig {
+            cascade_id: Some(self.conversation_id.clone()),
+            model_config: Some(
+                crate::proto::localharness::harness_config::ModelConfig::GeminiConfig(proto_gemini),
+            ),
+            system_instructions: proto_sys,
+            tools: proto_tools,
+            harness_side_tools: Some(side_tools),
+            compaction_threshold: self.capabilities_config.compaction_threshold,
+            workspaces: proto_workspaces,
+            skills_paths: self.skills_paths.clone(),
+            finish_tool_schema_json: self.capabilities_config.finish_tool_schema_json.clone(),
+            initial_trajectory: None,
+            app_data_dir: self.save_dir.clone(),
+        };
+
+        // 5. Send InitializeConversationEvent
+        let init_event = InitializeConversationEvent {
+            config: Some(harness_config),
+        };
+        let init_json = serde_json::to_string(&init_event)?;
+        ws_write.send(WsMessage::Text(init_json)).await?;
+
+        // 6. Spawn Background WS Sender Loop
+        let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Some(msg) = ws_rx.recv().await {
+                if let Err(e) = ws_write.send(WsMessage::Text(msg)).await {
+                    tracing::error!("WS Write Loop Error: {:?}", e);
+                    break;
+                }
+            }
+        });
+
+        // 7. Setup channels for step stream
+        let (step_tx, step_rx) = mpsc::unbounded_channel::<Result<Step, anyhow::Error>>();
+
+        let is_idle = Arc::new(AtomicBool::new(false));
+        let parent_idle = Arc::new(Mutex::new(false));
+        let active_subagent_ids = Arc::new(Mutex::new(HashSet::new()));
+        let step_trackers = Arc::new(Mutex::new(HashSet::new()));
+
+        let conn_ws_tx = ws_tx.clone();
+        let conn_is_idle = is_idle.clone();
+        let conn_parent_idle = parent_idle.clone();
+        let conn_active_subagents = active_subagent_ids.clone();
+        let conn_step_trackers = step_trackers.clone();
+
+        let tool_runner = self.tool_runner.clone();
+        let hook_runner = self.hook_runner.clone();
+        let conversation_id = self.conversation_id.clone();
+        let conn_conversation_id = conversation_id.clone();
+
+        // 8. Spawn Stderr Reader
+        let mut reader = tokio::io::BufReader::new(child_stderr);
+        tokio::spawn(async move {
+            let mut line = String::new();
+            while let Ok(n) = reader.read_line(&mut line).await {
+                if n == 0 {
+                    break;
+                }
+                tracing::info!("Harness stderr: {}", line.trim_end());
+                line.clear();
+            }
+        });
+
+        // 9. Spawn WS Reader Loop
+        tokio::spawn(async move {
+            while let Some(msg_res) = ws_read.next().await {
+                match msg_res {
+                    Ok(WsMessage::Text(raw_text)) => {
+                        match serde_json::from_str::<OutputEvent>(&raw_text) {
+                            Ok(output_event) => {
+                                if let Some(event) = output_event.event {
+                                    match event {
+                                        crate::proto::localharness::output_event::Event::StepUpdate(step_update) => {
+                                            let traj_id = step_update.trajectory_id.clone().unwrap_or_default();
+                                            let step_idx = step_update.step_index.unwrap_or(0);
+                                            let key = (traj_id.clone(), step_idx);
+
+                                            let is_new = conn_step_trackers.lock().await.insert(key);
+
+                                            // Map StepUpdate proto to Step domain model
+                                            let step_type = if step_update.compaction.is_some() {
+                                                StepType::Compaction
+                                            } else if step_update.finish.is_some() {
+                                                StepType::Finish
+                                            } else if step_update.list_directory.is_some()
+                                                || step_update.find_file.is_some()
+                                                || step_update.search_directory.is_some()
+                                                || step_update.view_file.is_some()
+                                                || step_update.create_file.is_some()
+                                                || step_update.edit_file.is_some()
+                                                || step_update.run_command.is_some()
+                                                || step_update.invoke_subagent.is_some()
+                                                || step_update.generate_image.is_some()
+                                            {
+                                                StepType::ToolCall
+                                            } else if step_update.text.is_some() {
+                                                StepType::TextResponse
+                                            } else {
+                                                StepType::Unknown
+                                            };
+
+                                            let mut tool_calls = Vec::new();
+                                            // Look for active tool fields in step update
+                                            if let Some(ref fd) = step_update.find_file {
+                                                tool_calls.push(ToolCall {
+                                                    id: format!("{traj_id}_{step_idx}"),
+                                                    name: "FIND_FILE".to_string(),
+                                                    args: serde_json::json!({
+                                                        "directory_path": fd.directory_path,
+                                                        "query": fd.query,
+                                                    }),
+                                                    canonical_path: fd.directory_path.clone(),
+                                                });
+                                            }
+                                            if let Some(ref run) = step_update.run_command {
+                                                tool_calls.push(ToolCall {
+                                                    id: format!("{traj_id}_{step_idx}"),
+                                                    name: "RUN_COMMAND".to_string(),
+                                                    args: serde_json::json!({
+                                                        "command_line": run.command_line,
+                                                        "working_dir": run.working_dir,
+                                                    }),
+                                                    canonical_path: None,
+                                                });
+                                            }
+                                            if let Some(ref view) = step_update.view_file {
+                                                tool_calls.push(ToolCall {
+                                                    id: format!("{traj_id}_{step_idx}"),
+                                                    name: "VIEW_FILE".to_string(),
+                                                    args: serde_json::json!({
+                                                        "file_path": view.file_path,
+                                                        "start_line": view.start_line,
+                                                        "end_line": view.end_line,
+                                                    }),
+                                                    canonical_path: view.file_path.clone(),
+                                                });
+                                            }
+                                            if let Some(ref write) = step_update.create_file {
+                                                tool_calls.push(ToolCall {
+                                                    id: format!("{traj_id}_{step_idx}"),
+                                                    name: "CREATE_FILE".to_string(),
+                                                    args: serde_json::json!({
+                                                        "file_path": write.file_path,
+                                                        "contents": write.contents,
+                                                    }),
+                                                    canonical_path: write.file_path.clone(),
+                                                });
+                                            }
+                                            if let Some(ref edit) = step_update.edit_file {
+                                                tool_calls.push(ToolCall {
+                                                    id: format!("{traj_id}_{step_idx}"),
+                                                    name: "EDIT_FILE".to_string(),
+                                                    args: serde_json::json!({
+                                                        "file_path": edit.file_path,
+                                                    }),
+                                                    canonical_path: edit.file_path.clone(),
+                                                });
+                                            }
+
+                                            let source = match step_update.source {
+                                                Some(1) => StepSource::System,
+                                                Some(2) => StepSource::User,
+                                                Some(3) => StepSource::Model,
+                                                _ => StepSource::Unknown,
+                                            };
+
+                                            let status = match step_update.state {
+                                                Some(1) => StepStatus::Active,
+                                                Some(2) => StepStatus::Done,
+                                                Some(3) => StepStatus::WaitingForUser,
+                                                Some(4) => StepStatus::Error,
+                                                _ => StepStatus::Unknown,
+                                            };
+
+                                            let target = match step_update.target {
+                                                Some(1) => StepTarget::User,
+                                                Some(2 | 3) => StepTarget::Environment,
+                                                _ => StepTarget::Unknown,
+                                            };
+
+                                            let usage = output_event.usage_metadata.map(|u| UsageMetadata {
+                                                prompt_token_count: u.prompt_token_count.unwrap_or(0),
+                                                candidates_token_count: u.candidates_token_count.unwrap_or(0),
+                                                total_token_count: u.total_token_count.unwrap_or(0),
+                                                cached_content_token_count: u.cached_content_token_count.unwrap_or(0),
+                                                thoughts_token_count: u.thoughts_token_count.unwrap_or(0),
+                                            });
+
+                                            let is_complete = Some(
+                                                source == StepSource::Model
+                                                    && status == StepStatus::Done
+                                                    && step_update.text.is_some()
+                                                    && target == StepTarget::User
+                                            );
+
+                                            let structured = step_update.finish.as_ref().and_then(|f| {
+                                                f.output_string.as_ref().and_then(|s| serde_json::from_str(s).ok())
+                                            });
+
+                                            let error_msg = step_update.error_message.clone().unwrap_or_default();
+
+                                            let step = Step {
+                                                id: format!("{traj_id}_{step_idx}"),
+                                                step_index: step_idx,
+                                                r#type: step_type,
+                                                source,
+                                                target,
+                                                status,
+                                                content: step_update.text.clone().unwrap_or_default(),
+                                                content_delta: step_update.text_delta.clone().unwrap_or_default(),
+                                                thinking: step_update.thinking.clone().unwrap_or_default(),
+                                                thinking_delta: step_update.thinking_delta.clone().unwrap_or_default(),
+                                                tool_calls,
+                                                error: error_msg,
+                                                is_complete_response: is_complete,
+                                                structured_output: structured,
+                                                usage_metadata: usage,
+                                                cascade_id: step_update.cascade_id.clone().unwrap_or_default(),
+                                                trajectory_id: traj_id.clone(),
+                                                http_code: 0,
+                                            };
+
+                                            let _ = step_tx.send(Ok(step));
+
+                                            // Hook confirmation processing
+                                            if is_new {
+                                                if let Some(ref q_req) = step_update.questions_request {
+                                                    let conn_ws_tx = conn_ws_tx.clone();
+                                                    let hook_runner = hook_runner.clone();
+                                                    let q_req_clone = q_req.clone();
+                                                    let trajectory_id = step_update.trajectory_id.clone();
+                                                    let step_index = step_update.step_index;
+                                                    tokio::spawn(async move {
+                                                        let mut questions_list = Vec::new();
+                                                        for uq in &q_req_clone.questions {
+                                                            if let Some(crate::proto::localharness::user_question::QuestionType::MultipleChoice(ref mc)) = uq.question_type {
+                                                                let mut opts = Vec::new();
+                                                                for (j, choice) in mc.choices.iter().enumerate() {
+                                                                    opts.push(AskQuestionOption {
+                                                                        id: (j + 1).to_string(),
+                                                                        text: choice.clone(),
+                                                                    });
+                                                                }
+                                                                questions_list.push(AskQuestionEntry {
+                                                                    question: mc.question.clone().unwrap_or_default(),
+                                                                    options: opts,
+                                                                    is_multi_select: mc.is_multi_select.unwrap_or(false),
+                                                                });
+                                                            }
+                                                        }
+
+                                                        let mut proto_answers = vec![
+                                                            UserQuestionAnswer {
+                                                                answer: Some(crate::proto::localharness::user_question_answer::Answer::Unanswered(true)),
+                                                            };
+                                                            q_req_clone.questions.len()
+                                                        ];
+
+                                                        if let Some(runner) = hook_runner.as_ref().filter(|_| !questions_list.is_empty()) {
+                                                            let res = runner.dispatch_interaction(&questions_list).await;
+                                                            if let Ok(Some(q_res)) = res {
+                                                                for (orig_idx, r) in q_res.responses.iter().enumerate() {
+                                                                    if !r.skipped {
+                                                                        let mut mc_ans = MultipleChoiceAnswer {
+                                                                            selected_choice_indices: Vec::new(),
+                                                                            freeform_response: Some(r.freeform_response.clone()),
+                                                                        };
+                                                                        if let Some(ref opts) = r.selected_option_ids {
+                                                                            for opt in opts {
+                                                                                if let Ok(idx) = opt.parse::<i32>() {
+                                                                                    mc_ans.selected_choice_indices.push(idx - 1);
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                        proto_answers[orig_idx] = UserQuestionAnswer {
+                                                                            answer: Some(crate::proto::localharness::user_question_answer::Answer::MultipleChoiceAnswer(mc_ans)),
+                                                                        };
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        let resp = UserQuestionsResponse {
+                                                            trajectory_id,
+                                                            step_index,
+                                                            result: Some(crate::proto::localharness::user_questions_response::Result::Response(QuestionsResponse {
+                                                                answers: proto_answers,
+                                                            })),
+                                                        };
+                                                        let input_event = InputEvent {
+                                                            event: Some(crate::proto::localharness::input_event::Event::QuestionResponse(resp)),
+                                                        };
+                                                        if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                                                            let _ = conn_ws_tx.send(raw_json);
+                                                        }
+                                                    });
+                                                }
+
+                                                if step_update.tool_confirmation_request.is_some() {
+                                                    let conn_ws_tx = conn_ws_tx.clone();
+                                                    let hook_runner = hook_runner.clone();
+                                                    let step_update_clone = step_update.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut allow = true;
+                                                        if let Some(ref runner) = hook_runner {
+                                                            // For testing/mocking we default allow to true or query hooks
+                                                            let tool_call = ToolCall {
+                                                                id: format!("{}_{}", step_update_clone.trajectory_id.clone().unwrap_or_default(), step_update_clone.step_index.unwrap_or(0)),
+                                                                name: "unknown".to_string(),
+                                                                args: Value::Null,
+                                                                canonical_path: None,
+                                                            };
+                                                            if let Ok(res) = runner.dispatch_pre_tool_call(&tool_call).await {
+                                                                allow = res.allow;
+                                                            }
+                                                        }
+
+                                                        let conf = ToolConfirmation {
+                                                            trajectory_id: step_update_clone.trajectory_id.clone(),
+                                                            step_index: step_update_clone.step_index,
+                                                            accepted: Some(allow),
+                                                        };
+                                                        let input_event = InputEvent {
+                                                            event: Some(crate::proto::localharness::input_event::Event::ToolConfirmation(conf)),
+                                                        };
+                                                        if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                                                            let _ = conn_ws_tx.send(raw_json);
+                                                        }
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        crate::proto::localharness::output_event::Event::TrajectoryStateUpdate(tsu) => {
+                                            let sub_id = tsu.trajectory_id.clone().unwrap_or_default();
+                                            let is_subagent = !sub_id.is_empty() && sub_id != conn_conversation_id;
+
+                                            let mut active_subs = conn_active_subagents.lock().await;
+                                            let mut p_idle = conn_parent_idle.lock().await;
+
+                                            if tsu.state == Some(1) { // STATE_RUNNING
+                                                if is_subagent {
+                                                    active_subs.insert(sub_id);
+                                                }
+                                            } else if tsu.state == Some(2) { // STATE_IDLE
+                                                if is_subagent {
+                                                    active_subs.remove(&sub_id);
+                                                } else {
+                                                    *p_idle = true;
+                                                }
+                                            }
+
+                                            if *p_idle && active_subs.is_empty() {
+                                                conn_is_idle.store(true, Ordering::SeqCst);
+                                            }
+                                        }
+                                        crate::proto::localharness::output_event::Event::ToolCall(tool_call) => {
+                                            let conn_ws_tx = conn_ws_tx.clone();
+                                            let tool_runner = tool_runner.clone();
+                                            let hook_runner = hook_runner.clone();
+                                            tokio::spawn(async move {
+                                                let args: Value = serde_json::from_str(&tool_call.arguments_json.clone().unwrap_or_default()).unwrap_or(Value::Null);
+                                                let tc = ToolCall {
+                                                    id: tool_call.id.clone().unwrap_or_default(),
+                                                    name: tool_call.name.clone().unwrap_or_default(),
+                                                    args,
+                                                    canonical_path: None,
+                                                };
+
+                                                let allow = if let Some(runner) = hook_runner.as_ref() {
+                                                    runner.dispatch_pre_tool_call(&tc).await.map_or(true, |res| res.allow)
+                                                } else {
+                                                    true
+                                                };
+
+                                                if !allow {
+                                                    let resp = ToolResponse {
+                                                        id: tool_call.id.clone(),
+                                                        response_json: Some("{\"error\": \"Execution denied by hook policy\"}".to_string()),
+                                                        supplemental_media: Vec::new(),
+                                                        response: None,
+                                                    };
+                                                    let input_event = InputEvent {
+                                                        event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
+                                                    };
+                                                    if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                                                        let _ = conn_ws_tx.send(raw_json);
+                                                    }
+                                                    return;
+                                                }
+
+                                                let mut result = ToolResult {
+                                                    id: tool_call.id.clone(),
+                                                    name: tc.name.clone(),
+                                                    result: None,
+                                                    error: None,
+                                                };
+
+                                                if let Some(ref runner) = tool_runner {
+                                                    let results = runner.process_tool_calls(vec![tc]).await;
+                                                    if let Some(r) = results.into_iter().next() {
+                                                        result = r;
+                                                    }
+                                                } else {
+                                                    result.error = Some("No tool runner registered".to_string());
+                                                }
+
+                                                let resp_json = if let Some(ref val) = result.result {
+                                                    serde_json::to_string(val).unwrap_or_default()
+                                                } else if let Some(ref err) = result.error {
+                                                    serde_json::to_string(&serde_json::json!({ "error": err })).unwrap_or_default()
+                                                } else {
+                                                    "{}".to_string()
+                                                };
+
+                                                let resp = ToolResponse {
+                                                    id: tool_call.id.clone(),
+                                                    response_json: Some(resp_json),
+                                                    supplemental_media: Vec::new(),
+                                                    response: None,
+                                                };
+                                                let input_event = InputEvent {
+                                                    event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
+                                                };
+                                                if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                                                    let _ = conn_ws_tx.send(raw_json);
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to deserialize OutputEvent: {:?}", e);
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = step_tx.send(Err(anyhow!("WS read error: {e:?}")));
+                        break;
+                    }
+                }
+            }
+        });
+
+        // 10. Hook runners dispatch session start
+        if let Some(ref runner) = self.hook_runner {
+            runner.dispatch_session_start().await?;
+        }
+
+        Ok(LocalConnection {
+            conversation_id,
+            process: Arc::new(Mutex::new(child)),
+            is_idle,
+            step_rx: Arc::new(Mutex::new(Some(step_rx))),
+            ws_tx,
+            tool_runner: self.tool_runner.clone(),
+            hook_runner: self.hook_runner.clone(),
+            parent_idle,
+            active_subagent_ids,
+            step_trackers,
+        })
+    }
+}
