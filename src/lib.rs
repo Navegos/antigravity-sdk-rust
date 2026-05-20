@@ -1,3 +1,47 @@
+//! # Google Antigravity Rust SDK
+//!
+//! The Google Antigravity SDK is a Rust library for building AI agents powered by Antigravity and Gemini.
+//! It provides a secure, scalable, and stateful infrastructure layer that abstracts the agentic loop,
+//! letting you focus on what your agent *does* rather than how it runs.
+//!
+//! ## Core Architecture Components
+//!
+//! - **[`Agent`](crate::agent::Agent)**: High-level manager of the agent lifecycle. It handles process discovery,
+//!   tool registration, hook dispatch, and starts the communication backend.
+//! - **[`Conversation`](crate::conversation::Conversation)**: Stateful wrapper around a connection that
+//!   tracks full step history, accumulates token usage metadata, and processes stream chunks.
+//! - **[`Connection`](crate::connection::Connection)**: Core trait abstracted to communicate with the
+//!   underlying harness (e.g. standard subprocess IPC or `WebSockets`).
+//! - **[`Hook`](crate::hooks::Hook)**: Lifecycle hooks allowing you to observe or modify agent transitions
+//!   and execute custom policies.
+//! - **[`Policy`](crate::policy::Policy)**: Middleware structures enforcing security rules (e.g. restricting files inside workspace
+//!   via `workspace_only` or prompting command runs via `confirm_run_command`).
+//! - **[`Tool`](crate::tools::Tool)**: Custom function capabilities written in Rust and exposed to the model.
+//! - **[`Trigger`](crate::triggers::Trigger)**: Asynchronous workers triggered at agent start.
+//!
+//! ## Quickstart Example
+//!
+//! ```no_run
+//! use antigravity_sdk_rust::agent::{Agent, AgentConfig};
+//! use antigravity_sdk_rust::policy;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), anyhow::Error> {
+//!     let mut config = AgentConfig::default();
+//!     // Allow all tools (e.g., file system, shell access)
+//!     config.policies = Some(vec![policy::allow_all()]);
+//!
+//!     let mut agent = Agent::new(config);
+//!     agent.start().await?;
+//!
+//!     let response = agent.chat("Say hello").await?;
+//!     println!("Agent: {}", response.text);
+//!
+//!     agent.stop().await?;
+//!     Ok(())
+//! }
+//! ```
+
 pub mod proto {
     #[allow(
         warnings,

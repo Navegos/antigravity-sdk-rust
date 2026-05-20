@@ -1,18 +1,38 @@
+//! Custom client-side tool definition and execution.
+//!
+//! This module defines the [`Tool`] trait, allowing custom functionality (e.g. database access,
+//! API requests) to be registered with the agent and executed when requested by the model.
+//! Registration and concurrent execution is managed via [`ToolRunner`].
+
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// A trait defining custom tool behaviors that can be invoked by the model.
 #[async_trait]
 pub trait Tool: Send + Sync {
+    /// Returns the unique name of the tool, matching what the model will call.
     fn name(&self) -> &str;
+
+    /// Returns a description of the tool to help the model understand when to use it.
     fn description(&self) -> &str;
+
+    /// Returns a JSON schema describing the expected parameters of the tool.
     fn parameters_json_schema(&self) -> &str;
+
+    /// Executes the tool with the given JSON arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if argument validation or tool execution fails.
     async fn call(&self, args: Value) -> Result<Value, anyhow::Error>;
 }
 
+/// Registry and concurrent runner for custom tool implementations.
 #[derive(Clone, Default)]
 pub struct ToolRunner {
+    /// Active tools registered with the runner.
     pub tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
 }
 
@@ -25,12 +45,14 @@ impl std::fmt::Debug for ToolRunner {
 }
 
 impl ToolRunner {
+    /// Creates a new, empty `ToolRunner`.
     pub fn new() -> Self {
         Self {
             tools: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
+    /// Registers a custom tool implementation.
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         self.tools
             .write()
@@ -38,6 +60,7 @@ impl ToolRunner {
             .insert(tool.name().to_string(), tool);
     }
 
+    /// Executes a list of tool invocations, mapping their outputs to [`ToolResult`](crate::types::ToolResult)s.
     pub async fn process_tool_calls(
         &self,
         calls: Vec<crate::types::ToolCall>,

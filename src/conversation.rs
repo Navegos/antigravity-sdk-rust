@@ -1,3 +1,8 @@
+//! Stateful conversation tracking and event chunk streaming.
+//!
+//! This module provides the [`Conversation`] struct, which coordinates an active session's
+//! event stream, aggregates history steps, tracks token usage metadata, and filters thinking/text deltas.
+
 use crate::connection::Connection;
 use crate::types::{
     ChatResponse, Step, StepSource, StepTarget, StepType, StreamChunk, UsageMetadata,
@@ -10,15 +15,25 @@ use tokio::sync::Mutex;
 
 const DEFAULT_MAX_HISTORY_SIZE: usize = 10_000;
 
+/// Internal accumulator of conversation steps and usage metrics.
 #[derive(Debug)]
 pub struct ConversationState {
+    /// Ordered list of all executed steps (including prompts, tool calls, results, and responses).
     pub steps: Vec<Step>,
+    /// Step indices marking the start of each user prompt turn.
     pub turn_start_indices: Vec<usize>,
+    /// Step indices marking where state compaction was performed.
     pub compaction_indices: Vec<usize>,
+    /// Total cumulative LLM token consumption across the entire session.
     pub cumulative_usage: UsageMetadata,
+    /// Token usage metrics for the current active turn, if any.
     pub turn_usage: Option<UsageMetadata>,
 }
 
+/// A stateful wrapper managing an active agentic session and its history.
+///
+/// `Conversation` consumes step events from an underlying [`Connection`], updates the cumulative history,
+/// tracks token usage, and provides high-level APIs to chat, stream structured events, and wait for run completions.
 pub struct Conversation {
     conn: Arc<dyn Connection>,
     max_history_size: usize,
@@ -35,6 +50,10 @@ impl std::fmt::Debug for Conversation {
 }
 
 impl Conversation {
+    /// Creates a new `Conversation` instance wrapping a [`Connection`].
+    ///
+    /// Optionally restricts the memory storage to `max_history_size` steps (default is 10,000 steps).
+    /// If `max_history_size` is set to `0`, state trimming is disabled.
     pub fn new(conn: Arc<dyn Connection>, max_history_size: Option<usize>) -> Self {
         Self {
             conn,
@@ -49,30 +68,37 @@ impl Conversation {
         }
     }
 
+    /// Returns the underlying [`Connection`].
     pub fn connection(&self) -> Arc<dyn Connection> {
         self.conn.clone()
     }
 
+    /// Returns the conversation ID assigned to the session.
     pub fn conversation_id(&self) -> &str {
         self.conn.conversation_id()
     }
 
+    /// Returns whether the connection is currently idle.
     pub fn is_idle(&self) -> bool {
         self.conn.is_idle()
     }
 
+    /// Retrieves a copy of the current conversation history steps.
     pub async fn history(&self) -> Vec<Step> {
         self.state.lock().await.steps.clone()
     }
 
+    /// Returns the total number of user-initiated turns executed in this session.
     pub async fn turn_count(&self) -> usize {
         self.state.lock().await.turn_start_indices.len()
     }
 
+    /// Returns the step indices where compaction (history compression) occurred.
     pub async fn compaction_indices(&self) -> Vec<usize> {
         self.state.lock().await.compaction_indices.clone()
     }
 
+    /// Scans the history backward and returns the text content of the last completed model response.
     pub async fn last_response(&self) -> String {
         let state = self.state.lock().await;
         let response = state
@@ -86,14 +112,17 @@ impl Conversation {
         response
     }
 
+    /// Returns the total token usage accumulated over all turns in the session.
     pub async fn total_usage(&self) -> UsageMetadata {
         self.state.lock().await.cumulative_usage.clone()
     }
 
+    /// Returns the token usage metrics from the last completed turn.
     pub async fn last_turn_usage(&self) -> Option<UsageMetadata> {
         self.state.lock().await.turn_usage.clone()
     }
 
+    /// Resets the conversation state, clearing all steps, compaction boundaries, and usage statistics.
     pub async fn clear_history(&self) {
         let mut state = self.state.lock().await;
         state.steps.clear();
@@ -103,6 +132,11 @@ impl Conversation {
         state.turn_usage = None;
     }
 
+    /// Sends a text prompt to the connection and registers the turn start boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying connection fails to transmit the prompt.
     pub async fn send(&self, prompt: &str) -> Result<(), anyhow::Error> {
         // If not idle, wait for it
         if !self.conn.is_idle() {
@@ -117,6 +151,7 @@ impl Conversation {
         self.conn.send(prompt).await
     }
 
+    /// Subscribes to step updates from the connection, inserting them into history and enforcing history limits.
     pub fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
         let conn_stream = self.conn.receive_steps();
         let state = self.state.clone();
@@ -192,6 +227,7 @@ impl Conversation {
             .boxed()
     }
 
+    /// Filters and maps the step event stream to yielding high-level [`StreamChunk`] deltas.
     pub fn receive_chunks(&self) -> BoxStream<'static, Result<StreamChunk, anyhow::Error>> {
         let steps = self.receive_steps();
         let mut seen_tool_ids = HashSet::new();
@@ -234,6 +270,11 @@ impl Conversation {
             .boxed()
     }
 
+    /// Starts a prompt turn and returns a stream of [`StreamChunk`] events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if sending the prompt fails.
     pub async fn chat(
         &self,
         prompt: &str,
@@ -242,6 +283,11 @@ impl Conversation {
         Ok(self.receive_chunks())
     }
 
+    /// Starts a prompt turn and resolves once the model completes its response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if sending the prompt or receiving chunk responses fails.
     pub async fn chat_to_completion(&self, prompt: &str) -> Result<ChatResponse, anyhow::Error> {
         let mut chunks = self.chat(prompt).await?;
         let mut text = String::new();
@@ -267,6 +313,11 @@ impl Conversation {
         })
     }
 
+    /// Gracefully closes the underlying connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if disconnecting the transport layer fails.
     pub async fn disconnect(&self) -> Result<(), anyhow::Error> {
         self.conn.disconnect().await
     }

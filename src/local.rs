@@ -1,3 +1,9 @@
+//! Local subprocess connection and negotiation.
+//!
+//! This module provides [`LocalConnectionStrategy`] to initialize and spawn the local
+//! agent subprocess, perform the initial handshake, and transition to a WebSocket session
+//! wrapped by [`LocalConnection`].
+
 use crate::connection::Connection;
 use crate::hooks::HookRunner;
 use crate::proto::localharness::{
@@ -36,9 +42,15 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+/// Connection strategy implementation communicating with a local subprocess harness.
+///
+/// `LocalConnection` handles launching and lifecycle tracking of the `localharness` binary,
+/// reading standard error output, upgrading communication to standard `WebSockets`, and managing
+/// subagent and tool invocation state.
 #[allow(dead_code)]
 pub struct LocalConnection {
     conversation_id: String,
+    learned_id: Arc<std::sync::OnceLock<String>>,
     process: Arc<Mutex<tokio::process::Child>>,
     child_stdin: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
     is_idle: Arc<AtomicBool>,
@@ -54,7 +66,7 @@ pub struct LocalConnection {
 impl std::fmt::Debug for LocalConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalConnection")
-            .field("conversation_id", &self.conversation_id)
+            .field("conversation_id", &self.conversation_id())
             .field("is_idle", &self.is_idle)
             .field("tool_runner", &self.tool_runner)
             .field("hook_runner", &self.hook_runner)
@@ -68,7 +80,11 @@ impl std::fmt::Debug for LocalConnection {
 #[async_trait]
 impl Connection for LocalConnection {
     fn conversation_id(&self) -> &str {
-        &self.conversation_id
+        if self.conversation_id.is_empty() {
+            self.learned_id.get().map_or("", String::as_str)
+        } else {
+            &self.conversation_id
+        }
     }
 
     fn is_idle(&self) -> bool {
@@ -84,50 +100,48 @@ impl Connection for LocalConnection {
             async move {
                 loop {
                     let mut guard = step_rx.lock().await;
-                    if let Some(ref mut rx) = *guard {
-                        match rx.try_recv() {
-                            Ok(step_res) => {
-                                match &step_res {
+                    let Some(rx) = &mut *guard else {
+                        return None;
+                    };
+                    match rx.try_recv() {
+                        Ok(step_res) => match &step_res {
+                            Ok(step) if step.id == "IDLE_SENTINEL" => {
+                                if is_idle.load(Ordering::SeqCst) {
+                                    return None;
+                                }
+                            }
+                            _ => {
+                                return Some((step_res, ()));
+                            }
+                        },
+                        Err(mpsc::error::TryRecvError::Empty) => {
+                            if is_idle.load(Ordering::SeqCst) {
+                                return None;
+                            }
+                            drop(guard);
+                            let mut guard2 = step_rx.lock().await;
+                            let Some(rx2) = &mut *guard2 else {
+                                return None;
+                            };
+                            let step_res = rx2.recv().await;
+                            drop(guard2);
+                            match step_res {
+                                Some(res) => match &res {
                                     Ok(step) if step.id == "IDLE_SENTINEL" => {
                                         if is_idle.load(Ordering::SeqCst) {
                                             return None;
                                         }
-                                        continue;
                                     }
-                                    _ => return Some((step_res, ())),
-                                }
-                            }
-                            Err(mpsc::error::TryRecvError::Empty) => {
-                                if is_idle.load(Ordering::SeqCst) {
-                                    return None;
-                                }
-                                drop(guard);
-                                let mut guard2 = step_rx.lock().await;
-                                if let Some(ref mut rx2) = *guard2 {
-                                    match rx2.recv().await {
-                                        Some(step_res) => {
-                                            match &step_res {
-                                                Ok(step) if step.id == "IDLE_SENTINEL" => {
-                                                    if is_idle.load(Ordering::SeqCst) {
-                                                        return None;
-                                                    }
-                                                    continue;
-                                                }
-                                                _ => return Some((step_res, ())),
-                                            }
-                                        }
-                                        None => return None,
+                                    _ => {
+                                        return Some((res, ()));
                                     }
-                                } else {
-                                    return None;
-                                }
-                            }
-                            Err(mpsc::error::TryRecvError::Disconnected) => {
-                                return None;
+                                },
+                                None => return None,
                             }
                         }
-                    } else {
-                        return None;
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            return None;
+                        }
                     }
                 }
             }
@@ -284,21 +298,33 @@ impl Connection for LocalConnection {
     }
 }
 
+/// Configurator and builder to spawn a local helper subprocess and build a connection.
 #[derive(Debug)]
 pub struct LocalConnectionStrategy {
+    /// Path to the `localharness` binary.
     pub binary_path: String,
+    /// Gemini configuration parameters.
     pub gemini_config: GeminiConfig,
+    /// Capability config specifying enabled tools.
     pub capabilities_config: CapabilitiesConfig,
+    /// System instruction content or templates.
     pub system_instructions: Option<SystemInstructions>,
+    /// Optional directory to store state and execution logs.
     pub save_dir: Option<String>,
+    /// Workspace paths.
     pub workspaces: Vec<String>,
+    /// Folders containing custom skill modules.
     pub skills_paths: Vec<String>,
+    /// Optional coordinator runner to handle custom tools.
     pub tool_runner: Option<ToolRunner>,
+    /// Optional coordinator runner to handle lifecycle hooks.
     pub hook_runner: Option<HookRunner>,
+    /// Conversation ID for standard session resuming or tracking.
     pub conversation_id: String,
 }
 
 impl LocalConnectionStrategy {
+    /// Creates a new `LocalConnectionStrategy`.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         binary_path: String,
@@ -326,6 +352,13 @@ impl LocalConnectionStrategy {
         }
     }
 
+    /// Spawns the subprocess helper binary, performs length-prefixed initialization,
+    /// upgrades connection to WebSocket, and builds the stateful [`LocalConnection`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the subprocess cannot be launched, the handshake fails,
+    /// or the WebSocket upgrade fails.
     #[allow(clippy::too_many_lines)]
     pub async fn connect(&self) -> Result<LocalConnection, anyhow::Error> {
         let api_key = self
@@ -619,6 +652,8 @@ impl LocalConnectionStrategy {
         let tool_runner = self.tool_runner.clone();
         let hook_runner = self.hook_runner.clone();
         let conversation_id = self.conversation_id.clone();
+        let learned_id = Arc::new(std::sync::OnceLock::new());
+        let conn_learned_id = learned_id.clone();
         let conn_cascade_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let conn_cascade_id_for_ws = conn_cascade_id.clone();
 
@@ -636,7 +671,8 @@ impl LocalConnectionStrategy {
         });
 
         // 9. Spawn WS Reader Loop
-        let pending_builtin_tool_calls = Arc::new(Mutex::new(HashMap::<(String, u32), ToolCall>::new()));
+        let pending_builtin_tool_calls =
+            Arc::new(Mutex::new(HashMap::<(String, u32), ToolCall>::new()));
         tokio::spawn(async move {
             while let Some(msg_res) = ws_read.next().await {
                 match msg_res {
@@ -656,6 +692,7 @@ impl LocalConnectionStrategy {
                                             {
                                                 let cascade_id_val = step_update.cascade_id.clone().unwrap_or_default();
                                                 if !cascade_id_val.is_empty() && cascade_id_val == traj_id {
+                                                    let _ = conn_learned_id.set(cascade_id_val.clone());
                                                     let mut cid = conn_cascade_id_for_ws.lock().await;
                                                     if cid.is_none() {
                                                         tracing::debug!("Learned cascade_id from StepUpdate: {}", cascade_id_val);
@@ -664,14 +701,28 @@ impl LocalConnectionStrategy {
                                                 }
                                             }
 
-                                            let mut trackers = conn_step_trackers.lock().await;
-                                            let tracker = trackers.entry(key.clone()).or_insert_with(|| StepTracker {
-                                                state: 0,
-                                                handled_requests: HashSet::new(),
-                                            });
-                                            if let Some(st) = step_update.state {
-                                                tracker.update_state(st as i32);
-                                            }
+                                            let (is_questions_new, is_tool_conf_new) = {
+                                                let mut trackers = conn_step_trackers.lock().await;
+                                                let tracker = trackers.entry(key.clone()).or_insert_with(|| StepTracker {
+                                                    state: 0,
+                                                    handled_requests: HashSet::new(),
+                                                });
+                                                if let Some(st) = step_update.state {
+                                                    tracker.update_state(st);
+                                                }
+                                                let is_q = if step_update.questions_request.is_some() {
+                                                    tracker.mark_handled("questions_request")
+                                                } else {
+                                                    false
+                                                };
+                                                let is_tc = if step_update.tool_confirmation_request.is_some() {
+                                                    tracker.mark_handled("tool_confirmation_request")
+                                                } else {
+                                                    false
+                                                };
+                                                drop(trackers);
+                                                (is_q, is_tc)
+                                            };
 
                                             // Map StepUpdate proto to Step domain model
                                             let step_type = if step_update.compaction.is_some() {
@@ -767,174 +818,154 @@ impl LocalConnectionStrategy {
                                             let _ = step_tx.send(Ok(step));
 
                                             // Detect platform-level errors (source=SYSTEM) and propagate them.
-                                            if source == StepSource::System && status == StepStatus::Error {
-                                                if http_code == 400 || http_code == 401 || http_code == 403 {
-                                                    let err_str = step_update.error.as_ref().and_then(|e| e.error_message.clone()).unwrap_or_else(|| "System error occurred.".to_string());
-                                                    let _ = step_tx.send(Err(anyhow!("System step error (HTTP {}): {}", http_code, err_str)));
-                                                    break;
-                                                }
+                                            if source == StepSource::System
+                                                && status == StepStatus::Error
+                                                && (http_code == 400 || http_code == 401 || http_code == 403)
+                                            {
+                                                let err_str = step_update.error.as_ref().and_then(|e| e.error_message.clone()).unwrap_or_else(|| "System error occurred.".to_string());
+                                                let _ = step_tx.send(Err(anyhow!("System step error (HTTP {}): {}", http_code, err_str)));
+                                                break;
                                             }
 
                                             // Dispatch post-tool-call or on-tool-error hooks for built-in tools
                                             let state_val = step_update.state.unwrap_or(0);
                                             if state_val == 2 || state_val == 4 {
                                                 let mut pending = pending_builtin_tool_calls.lock().await;
-                                                if let Some(tc) = pending.remove(&key) {
-                                                    if let Some(ref runner) = hook_runner {
-                                                        if state_val == 2 {
-                                                            let extracted = extract_tool_result(&step_update);
-                                                            let tr = ToolResult {
-                                                                name: tc.name.clone(),
-                                                                id: Some(tc.id.clone()),
-                                                                result: extracted.and_then(|r| r.result).or_else(|| step_update.text.clone().map(|t| Value::String(t))),
-                                                                error: None,
-                                                            };
-                                                            let runner_clone = runner.clone();
-                                                            tokio::spawn(async move {
-                                                                let _ = runner_clone.dispatch_post_tool_call(&tr).await;
-                                                            });
-                                                        } else {
-                                                            let err_msg = step_update.error_message.clone().unwrap_or_else(|| "Built-in tool failed".to_string());
-                                                            let err = anyhow!(err_msg);
-                                                            let runner_clone = runner.clone();
-                                                            tokio::spawn(async move {
-                                                                let _ = runner_clone.dispatch_on_tool_error(&err).await;
-                                                            });
-                                                        }
+                                                if let (Some(tc), Some(runner)) = (pending.remove(&key), hook_runner.as_ref()) {
+                                                    if state_val == 2 {
+                                                        let extracted = extract_tool_result(&step_update);
+                                                        let tr = ToolResult {
+                                                            name: tc.name.clone(),
+                                                            id: Some(tc.id.clone()),
+                                                            result: extracted.and_then(|r| r.result).or_else(|| step_update.text.clone().map(Value::String)),
+                                                            error: None,
+                                                        };
+                                                        let runner_clone = runner.clone();
+                                                        tokio::spawn(async move {
+                                                            let _ = runner_clone.dispatch_post_tool_call(&tr).await;
+                                                        });
+                                                    } else {
+                                                        let err_msg = step_update.error_message.clone().unwrap_or_else(|| "Built-in tool failed".to_string());
+                                                        let err = anyhow!(err_msg);
+                                                        let runner_clone = runner.clone();
+                                                        tokio::spawn(async move {
+                                                            let _ = runner_clone.dispatch_on_tool_error(&err).await;
+                                                        });
                                                     }
                                                 }
                                             }
 
-                                            // Hook confirmation processing
-                                            let is_questions_new = if step_update.questions_request.is_some() {
-                                                tracker.mark_handled("questions_request")
-                                            } else {
-                                                false
-                                            };
-
-                                            let is_tool_conf_new = if step_update.tool_confirmation_request.is_some() {
-                                                tracker.mark_handled("tool_confirmation_request")
-                                            } else {
-                                                false
-                                            };
-
-                                            if is_questions_new {
-                                                if let Some(ref q_req) = step_update.questions_request {
-                                                    let conn_ws_tx = conn_ws_tx.clone();
-                                                    let hook_runner = hook_runner.clone();
-                                                    let q_req_clone = q_req.clone();
-                                                    let trajectory_id = step_update.trajectory_id.clone();
-                                                    let step_index = step_update.step_index;
-                                                    tokio::spawn(async move {
-                                                        let mut questions_list = Vec::new();
-                                                        for uq in &q_req_clone.questions {
-                                                            if let Some(crate::proto::localharness::user_question::QuestionType::MultipleChoice(ref mc)) = uq.question_type {
-                                                                let mut opts = Vec::new();
-                                                                for (j, choice) in mc.choices.iter().enumerate() {
-                                                                    opts.push(AskQuestionOption {
-                                                                        id: (j + 1).to_string(),
-                                                                        text: choice.clone(),
-                                                                    });
-                                                                }
-                                                                questions_list.push(AskQuestionEntry {
-                                                                    question: mc.question.clone().unwrap_or_default(),
-                                                                    options: opts,
-                                                                    is_multi_select: mc.is_multi_select.unwrap_or(false),
+                                            if let (true, Some(q_req)) = (is_questions_new, &step_update.questions_request) {
+                                                let conn_ws_tx = conn_ws_tx.clone();
+                                                let hook_runner = hook_runner.clone();
+                                                let q_req_clone = q_req.clone();
+                                                let trajectory_id = step_update.trajectory_id.clone();
+                                                let step_index = step_update.step_index;
+                                                tokio::spawn(async move {
+                                                    let mut questions_list = Vec::new();
+                                                    for uq in &q_req_clone.questions {
+                                                        if let Some(crate::proto::localharness::user_question::QuestionType::MultipleChoice(ref mc)) = uq.question_type {
+                                                            let mut opts = Vec::new();
+                                                            for (j, choice) in mc.choices.iter().enumerate() {
+                                                                opts.push(AskQuestionOption {
+                                                                    id: (j + 1).to_string(),
+                                                                    text: choice.clone(),
                                                                 });
                                                             }
+                                                            questions_list.push(AskQuestionEntry {
+                                                                question: mc.question.clone().unwrap_or_default(),
+                                                                options: opts,
+                                                                is_multi_select: mc.is_multi_select.unwrap_or(false),
+                                                            });
                                                         }
+                                                    }
 
-                                                        let mut proto_answers = vec![
-                                                            UserQuestionAnswer {
-                                                                answer: Some(crate::proto::localharness::user_question_answer::Answer::Unanswered(true)),
-                                                            };
-                                                            q_req_clone.questions.len()
-                                                        ];
+                                                    let mut proto_answers = vec![
+                                                        UserQuestionAnswer {
+                                                            answer: Some(crate::proto::localharness::user_question_answer::Answer::Unanswered(true)),
+                                                        };
+                                                        q_req_clone.questions.len()
+                                                    ];
 
-                                                        if let Some(runner) = hook_runner.as_ref().filter(|_| !questions_list.is_empty()) {
-                                                            let res = runner.dispatch_interaction(&questions_list).await;
-                                                            if let Ok(Some(q_res)) = res {
-                                                                for (orig_idx, r) in q_res.responses.iter().enumerate() {
-                                                                    if !r.skipped {
-                                                                        let mut mc_ans = MultipleChoiceAnswer {
-                                                                            selected_choice_indices: Vec::new(),
-                                                                            freeform_response: Some(r.freeform_response.clone()),
-                                                                        };
-                                                                        if let Some(ref opts) = r.selected_option_ids {
-                                                                            for opt in opts {
-                                                                                if let Ok(idx) = opt.parse::<i32>() {
-                                                                                    mc_ans.selected_choice_indices.push(idx - 1);
-                                                                                }
+                                                    if let Some(runner) = hook_runner.as_ref().filter(|_| !questions_list.is_empty()) {
+                                                        let res = runner.dispatch_interaction(&questions_list).await;
+                                                        if let Ok(Some(q_res)) = res {
+                                                            for (orig_idx, r) in q_res.responses.iter().enumerate() {
+                                                                if !r.skipped {
+                                                                    let mut mc_ans = MultipleChoiceAnswer {
+                                                                        selected_choice_indices: Vec::new(),
+                                                                        freeform_response: Some(r.freeform_response.clone()),
+                                                                    };
+                                                                    if let Some(ref opts) = r.selected_option_ids {
+                                                                        for opt in opts {
+                                                                            if let Ok(idx) = opt.parse::<i32>() {
+                                                                                mc_ans.selected_choice_indices.push(idx - 1);
                                                                             }
                                                                         }
-                                                                        proto_answers[orig_idx] = UserQuestionAnswer {
-                                                                            answer: Some(crate::proto::localharness::user_question_answer::Answer::MultipleChoiceAnswer(mc_ans)),
-                                                                        };
                                                                     }
+                                                                    proto_answers[orig_idx] = UserQuestionAnswer {
+                                                                        answer: Some(crate::proto::localharness::user_question_answer::Answer::MultipleChoiceAnswer(mc_ans)),
+                                                                    };
                                                                 }
                                                             }
                                                         }
+                                                    }
 
-                                                        let resp = UserQuestionsResponse {
-                                                            trajectory_id,
-                                                            step_index,
-                                                            result: Some(crate::proto::localharness::user_questions_response::Result::Response(QuestionsResponse {
-                                                                answers: proto_answers,
-                                                            })),
-                                                        };
-                                                        let input_event = InputEvent {
-                                                            event: Some(crate::proto::localharness::input_event::Event::QuestionResponse(resp)),
-                                                        };
-                                                        if let Ok(raw_json) = serde_json::to_string(&input_event) {
-                                                            let _ = conn_ws_tx.send(raw_json);
-                                                        }
-                                                    });
-                                                }
+                                                    let resp = UserQuestionsResponse {
+                                                        trajectory_id,
+                                                        step_index,
+                                                        result: Some(crate::proto::localharness::user_questions_response::Result::Response(QuestionsResponse {
+                                                            answers: proto_answers,
+                                                        })),
+                                                    };
+                                                    let input_event = InputEvent {
+                                                        event: Some(crate::proto::localharness::input_event::Event::QuestionResponse(resp)),
+                                                    };
+                                                    if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                                                        let _ = conn_ws_tx.send(raw_json);
+                                                    }
+                                                });
                                             }
 
                                             if is_tool_conf_new {
-                                                if step_update.tool_confirmation_request.is_some() {
-                                                    let conn_ws_tx = conn_ws_tx.clone();
-                                                    let hook_runner = hook_runner.clone();
-                                                    let step_update_clone = step_update.clone();
-                                                    let pending_calls = pending_builtin_tool_calls.clone();
-                                                    tokio::spawn(async move {
-                                                        let mut allow = true;
-                                                        let tool_call = extract_builtin_tool_call(&step_update_clone);
-                                                        if let Some(ref tc) = tool_call {
-                                                            if let Some(ref runner) = hook_runner {
-                                                                if let Ok(res) = runner.dispatch_pre_tool_call(tc).await {
-                                                                    allow = res.allow;
-                                                                }
-                                                            }
-                                                            if allow {
-                                                                let key = (step_update_clone.trajectory_id.clone().unwrap_or_default(), step_update_clone.step_index.unwrap_or(0));
-                                                                pending_calls.lock().await.insert(key, tc.clone());
+                                                let conn_ws_tx = conn_ws_tx.clone();
+                                                let hook_runner = hook_runner.clone();
+                                                let step_update_clone = step_update.clone();
+                                                let pending_calls = pending_builtin_tool_calls.clone();
+                                                tokio::spawn(async move {
+                                                    let mut allow = true;
+                                                    let tool_call = extract_builtin_tool_call(&step_update_clone);
+                                                    if let Some(ref tc) = tool_call {
+                                                        if let Some(ref runner) = hook_runner {
+                                                            let pre_call = runner.dispatch_pre_tool_call(tc).await;
+                                                            if let Ok(res) = pre_call {
+                                                                allow = res.allow;
                                                             }
                                                         }
+                                                        if allow {
+                                                            let key = (step_update_clone.trajectory_id.clone().unwrap_or_default(), step_update_clone.step_index.unwrap_or(0));
+                                                            pending_calls.lock().await.insert(key, tc.clone());
+                                                        }
+                                                    }
 
-                                                        let conf = ToolConfirmation {
-                                                            trajectory_id: step_update_clone.trajectory_id.clone(),
-                                                            step_index: step_update_clone.step_index,
-                                                            accepted: Some(allow),
-                                                        };
-                                                        let input_event = InputEvent {
-                                                            event: Some(crate::proto::localharness::input_event::Event::ToolConfirmation(conf)),
-                                                        };
-                                                        if let Ok(raw_json) = serde_json::to_string(&input_event) {
-                                                            let _ = conn_ws_tx.send(raw_json);
-                                                        }
-                                                    });
-                                                }
+                                                    let conf = ToolConfirmation {
+                                                        trajectory_id: step_update_clone.trajectory_id.clone(),
+                                                        step_index: step_update_clone.step_index,
+                                                        accepted: Some(allow),
+                                                    };
+                                                    let input_event = InputEvent {
+                                                        event: Some(crate::proto::localharness::input_event::Event::ToolConfirmation(conf)),
+                                                    };
+                                                    if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                                                        let _ = conn_ws_tx.send(raw_json);
+                                                    }
+                                                });
                                             }
                                         }
                                         crate::proto::localharness::output_event::Event::TrajectoryStateUpdate(tsu) => {
                                             let sub_id = tsu.trajectory_id.clone().unwrap_or_default();
                                             let learned_cascade = conn_cascade_id_for_ws.lock().await;
-                                            let is_subagent = match learned_cascade.as_ref() {
-                                                Some(cid) => !sub_id.is_empty() && sub_id != *cid,
-                                                None => false, // No cascade_id learned yet, treat everything as parent
-                                            };
+                                            let is_subagent = learned_cascade.as_ref().is_some_and(|cid| !sub_id.is_empty() && sub_id != *cid);
                                             tracing::debug!("TrajectoryStateUpdate: trajectory_id={:?}, state={:?}, is_subagent={}, learned_cascade_id={:?}", sub_id, tsu.state, is_subagent, *learned_cascade);
                                             drop(learned_cascade);
 
@@ -954,16 +985,14 @@ impl LocalConnectionStrategy {
                                             }
 
                                             tracing::debug!("TrajectoryStateUpdate: p_idle={}, active_subs_empty={}", *p_idle, active_subs.is_empty());
-                                             if *p_idle && active_subs.is_empty() {
-                                                 if !conn_is_idle.swap(true, Ordering::SeqCst) {
-                                                    tracing::debug!("Connection transitioned to IDLE, sending sentinel");
-                                                     let sentinel = Step {
-                                                         id: "IDLE_SENTINEL".to_string(),
-                                                         ..Default::default()
-                                                     };
-                                                     let _ = step_tx.send(Ok(sentinel));
-                                                 }
-                                             }
+                                            if *p_idle && active_subs.is_empty() && !conn_is_idle.swap(true, Ordering::SeqCst) {
+                                                tracing::debug!("Connection transitioned to IDLE, sending sentinel");
+                                                let sentinel = Step {
+                                                    id: "IDLE_SENTINEL".to_string(),
+                                                    ..Default::default()
+                                                };
+                                                let _ = step_tx.send(Ok(sentinel));
+                                            }
                                         }
                                         crate::proto::localharness::output_event::Event::ToolCall(tool_call) => {
                                             let conn_ws_tx = conn_ws_tx.clone();
@@ -1016,17 +1045,15 @@ impl LocalConnectionStrategy {
                                                     result.error = Some("No tool runner registered".to_string());
                                                 }
 
-                                                if result.error.is_some() {
-                                                    if let Some(ref runner) = hook_runner {
-                                                        let err_str = result.error.clone().unwrap_or_default();
-                                                        if let Ok((res, val)) = runner.dispatch_on_tool_error(&anyhow!(err_str)).await {
-                                                            if res.allow {
-                                                                result.result = val;
-                                                                result.error = None;
-                                                            }
+                                                if let (Some(err_str), Some(runner)) = (result.error.as_ref(), hook_runner.as_ref()) {
+                                                    if let Ok((res, val)) = runner.dispatch_on_tool_error(&anyhow!(err_str.clone())).await {
+                                                        let allow_error = res.allow;
+                                                        if allow_error {
+                                                            result.result = val;
+                                                            result.error = None;
                                                         }
                                                     }
-                                                } else if let Some(ref runner) = hook_runner {
+                                                } else if let Some(runner) = hook_runner.as_ref() {
                                                     let _ = runner.dispatch_post_tool_call(&result).await;
                                                 }
 
@@ -1056,7 +1083,11 @@ impl LocalConnectionStrategy {
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("Failed to deserialize OutputEvent: {:?}. Raw: {}", e, &raw_text[..raw_text.len().min(300)]);
+                                tracing::error!(
+                                    "Failed to deserialize OutputEvent: {:?}. Raw: {}",
+                                    e,
+                                    &raw_text[..raw_text.len().min(300)]
+                                );
                             }
                         }
                     }
@@ -1076,6 +1107,7 @@ impl LocalConnectionStrategy {
 
         Ok(LocalConnection {
             conversation_id,
+            learned_id,
             process: Arc::new(Mutex::new(child)),
             child_stdin: Arc::new(Mutex::new(Some(child_stdin))),
             is_idle,
@@ -1090,6 +1122,7 @@ impl LocalConnectionStrategy {
     }
 }
 
+/// Internal state tracker for matching `StepUpdate` payloads with active handshakes.
 #[derive(Debug)]
 pub struct StepTracker {
     state: i32,
@@ -1097,21 +1130,25 @@ pub struct StepTracker {
 }
 
 impl StepTracker {
-    pub fn update_state(&mut self, state: i32) {
+    /// Updates the tracked step status state.
+    pub const fn update_state(&mut self, state: i32) {
         self.state = state;
     }
 
+    /// Marks a specific request payload (e.g. "`tool_confirmation_request`") as handled.
+    /// Returns true if the tracker transitioned to active for the request.
     pub fn mark_handled(&mut self, request_name: &str) -> bool {
         if self.state == 3 && !self.handled_requests.contains(request_name) {
             self.handled_requests.insert(request_name.to_string());
-            true
-        } else {
-            false
+            return true;
         }
+        false
     }
 }
 
-fn extract_builtin_tool_call(step_update: &crate::proto::localharness::StepUpdate) -> Option<ToolCall> {
+fn extract_builtin_tool_call(
+    step_update: &crate::proto::localharness::StepUpdate,
+) -> Option<ToolCall> {
     let traj_id = step_update.trajectory_id.clone().unwrap_or_default();
     let step_idx = step_update.step_index.unwrap_or(0);
     let id = format!("{traj_id}_{step_idx}");
@@ -1180,7 +1217,7 @@ fn extract_tool_result(step_update: &crate::proto::localharness::StepUpdate) -> 
     let id = format!("{traj_id}_{step_idx}");
 
     let tool_call = extract_builtin_tool_call(step_update)?;
-    let result = step_update.text.clone().map(|t| Value::String(t));
+    let result = step_update.text.clone().map(Value::String);
     let error = step_update.error_message.clone();
 
     Some(ToolResult {

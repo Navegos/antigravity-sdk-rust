@@ -1,22 +1,41 @@
+//! Safety policies and middleware for tool execution control.
+//!
+//! This module defines the safety policies that can be configured on an [`crate::agent::Agent`]
+//! to restrict tool invocation permissions, establish sandbox/workspace boundaries,
+//! or require explicit user confirmation.
+
 use crate::hooks::Hook;
 use crate::types::{HookResult, ToolCall};
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Represents the safety enforcement action to take when a tool invocation is intercepted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
+    /// Allow execution of the tool automatically.
     Approve,
+    /// Block execution and return an access denied error.
     Deny,
+    /// Ask the user for confirmation before executing the tool.
     AskUser,
 }
 
+/// A policy configuration mapping a tool name to a safety [`Decision`].
+///
+/// Wildcard (`*`) rules are supported to act as a fallback, which are overridden
+/// by specific tool rules according to a precedence bucketed hierarchy.
 #[derive(Clone)]
 pub struct Policy {
+    /// The exact tool name, or `*` for a wildcard matching any tool.
     pub tool: String,
+    /// The enforcement decision to apply when the tool matches.
     pub decision: Decision,
+    /// An optional filter function that decides if the policy applies based on the tool parameters.
     pub when: Option<Arc<dyn Fn(&ToolCall) -> bool + Send + Sync>>,
+    /// An optional callback deciding whether to prompt the user for confirmation.
     pub ask_user: Option<Arc<dyn Fn(&ToolCall) -> bool + Send + Sync>>,
+    /// A descriptive name for the safety policy.
     pub name: String,
 }
 
@@ -33,6 +52,7 @@ impl std::fmt::Debug for Policy {
 }
 
 impl Policy {
+    /// Creates a new policy rule.
     pub fn new(
         tool: String,
         decision: Decision,
@@ -49,17 +69,20 @@ impl Policy {
         }
     }
 
+    /// Adds a conditional filter function to the policy.
     pub fn when(mut self, when_fn: impl Fn(&ToolCall) -> bool + Send + Sync + 'static) -> Self {
         self.when = Some(Arc::new(when_fn));
         self
     }
 
+    /// Customizes the policy's debug/tracing name.
     pub fn with_name(mut self, name: &str) -> Self {
         self.name = name.to_string();
         self
     }
 }
 
+/// Helper constructor to approve a specific tool invocation unconditionally.
 pub fn allow(tool: &str) -> Policy {
     Policy::new(
         tool.to_string(),
@@ -70,10 +93,12 @@ pub fn allow(tool: &str) -> Policy {
     )
 }
 
+/// Helper constructor to deny a specific tool invocation unconditionally.
 pub fn deny(tool: &str) -> Policy {
     Policy::new(tool.to_string(), Decision::Deny, None, None, String::new())
 }
 
+/// Helper constructor to require user confirmation for a specific tool.
 pub fn ask_user(tool: &str, handler: impl Fn(&ToolCall) -> bool + Send + Sync + 'static) -> Policy {
     Policy::new(
         tool.to_string(),
@@ -84,6 +109,7 @@ pub fn ask_user(tool: &str, handler: impl Fn(&ToolCall) -> bool + Send + Sync + 
     )
 }
 
+/// Helper constructor to approve all tool calls as a wildcard fallback.
 pub fn allow_all() -> Policy {
     Policy::new(
         "*".to_string(),
@@ -94,6 +120,7 @@ pub fn allow_all() -> Policy {
     )
 }
 
+/// Helper constructor to deny all tool calls as a wildcard fallback.
 pub fn deny_all() -> Policy {
     Policy::new(
         "*".to_string(),
@@ -104,6 +131,7 @@ pub fn deny_all() -> Policy {
     )
 }
 
+/// Creates a standard set of policies that requires user approval for commands or denies them.
 pub fn confirm_run_command(
     handler: Option<Arc<dyn Fn(&ToolCall) -> bool + Send + Sync>>,
 ) -> Vec<Policy> {
@@ -135,6 +163,7 @@ pub fn confirm_run_command(
     )
 }
 
+/// Creates a set of policies restricting file system tools to specified workspace directory paths.
 pub fn workspace_only(workspaces: Vec<String>) -> Vec<Policy> {
     let file_tools = vec![
         "CREATE_FILE",
@@ -178,6 +207,11 @@ pub fn workspace_only(workspaces: Vec<String>) -> Vec<Policy> {
         .collect()
 }
 
+/// Validates and compiles a list of [`Policy`] items into a [`PolicyEnforcer`].
+///
+/// # Errors
+///
+/// Returns an error if any `AskUser` policy is missing a confirmation handler callback.
 pub fn enforce(policies: Vec<Policy>) -> Result<PolicyEnforcer, anyhow::Error> {
     for p in &policies {
         if p.decision == Decision::AskUser && p.ask_user.is_none() {
@@ -190,11 +224,13 @@ pub fn enforce(policies: Vec<Policy>) -> Result<PolicyEnforcer, anyhow::Error> {
     Ok(PolicyEnforcer::new(policies))
 }
 
+/// Safety policy middleware enforcer implemented as a lifecycle [`Hook`].
 pub struct PolicyEnforcer {
     buckets: [Vec<Policy>; 6],
 }
 
 impl PolicyEnforcer {
+    /// Compiles policies into prioritized buckets for performance and precedence.
     pub fn new(policies: Vec<Policy>) -> Self {
         let mut buckets = [
             Vec::new(),

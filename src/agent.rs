@@ -11,21 +11,37 @@ use crate::types::{
 use anyhow::anyhow;
 use std::sync::Arc;
 
+/// Configuration settings used to customize the behavior and capabilities of an [`Agent`].
 #[derive(Default)]
 pub struct AgentConfig {
+    /// Optional path to the `localharness` binary. If not provided, it will be automatically
+    /// resolved via standard paths or standard environments.
     pub binary_path: Option<String>,
+    /// Gemini LLM configuration details (API key, default models, thinking settings, etc.).
     pub gemini_config: GeminiConfig,
+    /// Capabilities config specifying enabled/disabled tools and threshold limits.
     pub capabilities: CapabilitiesConfig,
+    /// Optional system instructions (either appended template sections or fully custom text).
     pub system_instructions: Option<SystemInstructions>,
+    /// Optional directory to save session state logs.
     pub save_dir: Option<String>,
+    /// Configured workspaces. If not provided, defaults to the current working directory.
     pub workspaces: Option<Vec<String>>,
+    /// Paths to local folders containing custom skill modules.
     pub skills_paths: Vec<String>,
+    /// Set of safety policies (e.g., workspace lock, run command approvals) to restrict tool execution.
     pub policies: Option<Vec<Policy>>,
+    /// Handlers triggered during agent lifecycle hooks (pre/post tool calls, start session, etc.).
     pub hooks: Vec<Arc<dyn Hook>>,
+    /// Custom triggers spawned when the agent starts.
     pub triggers: Vec<Arc<dyn Trigger>>,
+    /// Custom Rust tools registered to be available for invocation.
     pub tools: Vec<Arc<dyn Tool>>,
+    /// Specific conversation ID to assign or resume.
     pub conversation_id: Option<String>,
+    /// Path to the application data directory where cache/configs are stored.
     pub app_data_dir: Option<String>,
+    /// Optional JSON schema constraining the final structured tool output.
     pub response_schema: Option<String>,
 }
 
@@ -50,6 +66,32 @@ impl std::fmt::Debug for AgentConfig {
     }
 }
 
+/// High-level orchestrator that manages an agentic execution session.
+///
+/// An `Agent` encapsulates binary discovery, WebSocket upgrades, tool wiring, safety policy enforcement,
+/// and observer hook dispatch. It provides a simple `chat` API for sending prompts and retrieving responses.
+///
+/// # Examples
+///
+/// ```no_run
+/// use antigravity_sdk_rust::agent::{Agent, AgentConfig};
+/// use antigravity_sdk_rust::policy;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), anyhow::Error> {
+///     let mut config = AgentConfig::default();
+///     config.policies = Some(vec![policy::allow_all()]);
+///
+///     let mut agent = Agent::new(config);
+///     agent.start().await?;
+///
+///     let response = agent.chat("What is 2+2?").await?;
+///     println!("Agent: {}", response.text);
+///
+///     agent.stop().await?;
+///     Ok(())
+/// }
+/// ```
 pub struct Agent {
     config: AgentConfig,
     conversation: Option<Arc<Conversation>>,
@@ -71,6 +113,7 @@ impl std::fmt::Debug for Agent {
 }
 
 impl Agent {
+    /// Creates a new `Agent` with the given configuration.
     pub fn new(config: AgentConfig) -> Self {
         Self {
             config,
@@ -81,6 +124,7 @@ impl Agent {
         }
     }
 
+    /// Registers a custom lifecycle hook. Hooks can observe or modify agent transitions.
     pub fn register_hook(&self, hook: Arc<dyn Hook>) {
         let hr = self.hook_runner.clone();
         tokio::spawn(async move {
@@ -88,6 +132,11 @@ impl Agent {
         });
     }
 
+    /// Registers a custom background trigger. Triggers must be registered *before* the agent starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the agent session has already been started.
     pub fn register_trigger(&mut self, trigger: Arc<dyn Trigger>) -> Result<(), anyhow::Error> {
         if self.conversation.is_some() {
             return Err(anyhow!(
@@ -98,6 +147,7 @@ impl Agent {
         Ok(())
     }
 
+    /// Registers a custom tool available for execution by the agent.
     pub fn register_tool(&self, tool: Arc<dyn Tool>) {
         let tr = self.tool_runner.clone();
         tokio::spawn(async move {
@@ -105,6 +155,15 @@ impl Agent {
         });
     }
 
+    /// Spawns the subprocess communication harness, initializes safety policies, registers tools/hooks,
+    /// establishes the WebSocket session, and starts any configured triggers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The `localharness` binary cannot be resolved.
+    /// - Write tools are enabled but no safety policies are configured.
+    /// - The WebSocket upgrade or subprocess connection fails.
     #[allow(clippy::too_many_lines)]
     pub async fn start(&mut self) -> Result<(), anyhow::Error> {
         if self.conversation.is_some() {
@@ -216,7 +275,9 @@ impl Agent {
         // 6. Build and connect strategy
         #[cfg(target_arch = "wasm32")]
         {
-            return Err(anyhow!("Default LocalConnection is not supported on WebAssembly. Implement and use a custom connection strategy."));
+            return Err(anyhow!(
+                "Default LocalConnection is not supported on WebAssembly. Implement and use a custom connection strategy."
+            ));
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -254,23 +315,39 @@ impl Agent {
         }
     }
 
+    /// Sends a prompt message to the active agent session and awaits the final completed response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the agent is not yet started or if the execution stream encounters a failure.
     pub async fn chat(&self, prompt: &str) -> Result<ChatResponse, anyhow::Error> {
         let conversation = self.conversation()?;
         conversation.chat_to_completion(prompt).await
     }
 
+    /// Returns the active [`Conversation`] session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the agent is not yet started.
     pub fn conversation(&self) -> Result<Arc<Conversation>, anyhow::Error> {
         self.conversation
             .clone()
             .ok_or_else(|| anyhow!("Agent session not started. Use start() first."))
     }
 
+    /// Returns the active conversation ID if the session has started.
     pub fn conversation_id(&self) -> Option<String> {
         self.conversation
             .as_ref()
             .map(|c| c.conversation_id().to_string())
     }
 
+    /// Gracefully stops the agent connection and disconnects the underlying harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if closing the connection fails.
     pub async fn stop(&mut self) -> Result<(), anyhow::Error> {
         if let Some(conversation) = self.conversation.take() {
             conversation.disconnect().await?;
@@ -294,21 +371,24 @@ fn get_default_binary_path() -> Option<String> {
         }
     }
     // Check Python site-packages as a fallback since google-antigravity Python package installs it there
-    if let Ok(output) = std::process::Command::new("python3")
-        .args(["-c", "import site; print('\\n'.join(site.getsitepackages()))"])
+    if let Some(output) = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import site; print('\\n'.join(site.getsitepackages()))",
+        ])
         .output()
+        .ok()
+        .filter(|o| o.status.success())
     {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let p = std::path::Path::new(line.trim())
-                    .join("google")
-                    .join("antigravity")
-                    .join("bin")
-                    .join("localharness");
-                if p.exists() {
-                    return Some(p.to_string_lossy().into_owned());
-                }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let p = std::path::Path::new(line.trim())
+                .join("google")
+                .join("antigravity")
+                .join("bin")
+                .join("localharness");
+            if p.exists() {
+                return Some(p.to_string_lossy().into_owned());
             }
         }
     }

@@ -1,30 +1,49 @@
+//! Common configuration structures, enums, and SDK data models.
+//!
+//! This module houses all the data types shared across the SDK, including Gemini configuration
+//! parameters, system instructions, capability filters, built-in tools list, and step execution progress structs.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// The default model name used when none is specified.
 pub const DEFAULT_MODEL: &str = "gemini-3.5-flash";
+
+/// The default image generation model name used.
 pub const DEFAULT_IMAGE_GENERATION_MODEL: &str = "gemini-3.1-flash-image-preview";
 
+/// Configures the intensity of the reasoning/thinking process for models that support it.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
+    /// Minimal reasoning overhead.
     Minimal,
+    /// Low reasoning.
     Low,
+    /// Medium reasoning.
     Medium,
+    /// High reasoning.
     High,
 }
 
+/// Generation configuration parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GenerationConfig {
+    /// Desired thinking level for reasoning-based models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<ThinkingLevel>,
 }
 
+/// Specific model entry defining the model name, key, and generation settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntry {
+    /// The name/identifier of the model.
     pub name: String,
+    /// Model-specific API key (if overriding the global key).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Generation settings (e.g. thinking configurations).
     #[serde(default)]
     pub generation: GenerationConfig,
 }
@@ -39,10 +58,13 @@ impl Default for ModelEntry {
     }
 }
 
+/// Mapping of models configured for different tasks in the agent's session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
+    /// The primary text/chat model.
     #[serde(default = "default_model_entry")]
     pub default: ModelEntry,
+    /// The model used for image generation tasks.
     #[serde(default = "default_image_generation_entry")]
     pub image_generation: ModelEntry,
 }
@@ -72,65 +94,91 @@ impl Default for ModelConfig {
     }
 }
 
+/// Root configurations for the Gemini AI model endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GeminiConfig {
+    /// Global API key for Gemini endpoints.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Model configurations.
     #[serde(default)]
     pub models: ModelConfig,
 }
 
+/// A structured section appended to system instructions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInstructionSection {
+    /// Main markdown or text body of the section.
     pub content: String,
+    /// Described title of the section.
     pub title: String,
 }
 
+/// Directly supplied system instruction instructions text override.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomSystemInstructions {
+    /// Custom raw instructions text.
     pub text: String,
 }
 
+/// Appended instructions format, maintaining identity overrides and section segments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendedSystemInstructions {
+    /// Optional override for the agent's custom identity block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_identity: Option<String>,
+    /// Sections to be appended to the standard system instructions.
     #[serde(default)]
     pub appended_sections: Vec<SystemInstructionSection>,
 }
 
+/// Represents the style or content source for system instructions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SystemInstructions {
+    /// Completely custom text override.
     Custom(CustomSystemInstructions),
+    /// Standard structured segments appended to the system identity.
     Appended(AppendedSystemInstructions),
 }
 
+/// Enumeration of built-in tools supported by the agent system.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum BuiltinTools {
+    /// Tool to create a new file.
     #[serde(rename = "CREATE_FILE")]
     CreateFile,
+    /// Tool to edit an existing file.
     #[serde(rename = "EDIT_FILE")]
     EditFile,
+    /// Tool to query/find files in a directory.
     #[serde(rename = "FIND_FILE")]
     FindFile,
+    /// Tool to list files inside a directory.
     #[serde(rename = "LIST_DIR")]
     ListDir,
+    /// Tool to execute a shell command.
     #[serde(rename = "RUN_COMMAND")]
     RunCommand,
+    /// Tool to perform ripgrep searches.
     #[serde(rename = "SEARCH_DIR")]
     SearchDir,
+    /// Tool to view a file's content.
     #[serde(rename = "VIEW_FILE")]
     ViewFile,
+    /// Tool to instantiate a subagent.
     #[serde(rename = "START_SUBAGENT")]
     StartSubagent,
+    /// Tool to generate images from descriptions.
     #[serde(rename = "GENERATE_IMAGE")]
     GenerateImage,
+    /// Terminating signal indicating the task is completed.
     #[serde(rename = "FINISH")]
     Finish,
 }
 
 impl BuiltinTools {
+    /// Returns the static string slice mapping to the tool name.
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::CreateFile => "CREATE_FILE",
@@ -146,6 +194,7 @@ impl BuiltinTools {
         }
     }
 
+    /// Returns a list of all safe, read-only tools.
     pub fn read_only() -> Vec<Self> {
         vec![
             Self::FindFile,
@@ -156,40 +205,62 @@ impl BuiltinTools {
     }
 }
 
+/// Agent capabilities and tool restrictions configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CapabilitiesConfig {
+    /// List of explicitly enabled tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled_tools: Option<Vec<BuiltinTools>>,
+    /// List of explicitly disabled tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_tools: Option<Vec<BuiltinTools>>,
+    /// Threshold at which the message history is compacted/summarized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction_threshold: Option<u32>,
+    /// Custom schema override for the finish tool schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_tool_schema_json: Option<String>,
+    /// Model designated for processing images.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_model: Option<String>,
 }
 
+/// Configuration settings for Model Context Protocol (MCP) servers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum McpServerConfig {
+    /// Launch the MCP server as a local stdio process.
     #[serde(rename = "stdio")]
-    Stdio { command: String, args: Vec<String> },
+    Stdio {
+        /// command binary.
+        command: String,
+        /// execution arguments.
+        args: Vec<String>,
+    },
+    /// Connect to the MCP server via Server-Sent Events (SSE).
     #[serde(rename = "sse")]
     Sse {
+        /// HTTP URL endpoint.
         url: String,
+        /// Additional HTTP headers.
         #[serde(skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
     },
+    /// Connect to the MCP server via standard HTTP.
     #[serde(rename = "http")]
     Http {
+        /// HTTP URL endpoint.
         url: String,
+        /// Additional HTTP headers.
         #[serde(skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
+        /// General connection timeout in seconds.
         #[serde(default = "default_mcp_timeout")]
         timeout: f64,
+        /// Reading timeout for the SSE listener.
         #[serde(default = "default_mcp_sse_timeout")]
         sse_read_timeout: f64,
+        /// Flag whether to terminate the channel connection when closed.
         #[serde(default = "default_true")]
         terminate_on_close: bool,
     },
@@ -205,115 +276,173 @@ const fn default_true() -> bool {
     true
 }
 
+/// Describes a model's request to execute a registered tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    /// Unique call ID generated for correlation.
     pub id: String,
+    /// Name of the target tool.
     pub name: String,
+    /// Arguments payload parsed as JSON.
     pub args: Value,
+    /// Canonical file system path (if the tool targets a file/directory).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canonical_path: Option<String>,
 }
 
+/// The response outcome of executing a client-side tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// Name of the executed tool.
     pub name: String,
+    /// Optional matching tool call ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Output result of successful tool execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    /// Error message string if tool execution failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
+/// Consumption stats for API usage tracking.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageMetadata {
+    /// Tokens included in the request prompt.
     pub prompt_token_count: i32,
+    /// Tokens generated in candidates.
     pub candidates_token_count: i32,
+    /// Total combined tokens.
     pub total_token_count: i32,
+    /// Cache hit content tokens.
     #[serde(default)]
     pub cached_content_token_count: i32,
+    /// Tokens consumed during inner thinking/reasoning.
     #[serde(default)]
     pub thoughts_token_count: i32,
 }
 
+/// The classification type of a step in the trajectory.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StepType {
+    /// Raw text content returned by the model.
     #[serde(rename = "TEXT_RESPONSE")]
     TextResponse,
+    /// Execution of a tool call.
     #[serde(rename = "TOOL_CALL")]
     ToolCall,
+    /// Logging or notification events from the system.
     #[serde(rename = "SYSTEM_MESSAGE")]
     SystemMessage,
+    /// A history compaction step summarizing context.
     #[serde(rename = "COMPACTION")]
     Compaction,
+    /// Terminating milestone indicator.
     #[serde(rename = "FINISH")]
     Finish,
+    /// Catch-all variant for unrecognized steps.
     #[serde(rename = "UNKNOWN")]
     Unknown,
 }
 
+/// The originating source component of a trajectory step.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StepSource {
+    /// Internal orchestration environment.
     #[serde(rename = "SYSTEM")]
     System,
+    /// End-user input.
     #[serde(rename = "USER")]
     User,
+    /// Generative model prediction.
     #[serde(rename = "MODEL")]
     Model,
+    /// Unknown author.
     #[serde(rename = "UNKNOWN")]
     Unknown,
 }
 
+/// The target destination of a step event.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StepTarget {
+    /// Event addressed to the user.
     #[serde(rename = "TARGET_USER")]
     User,
+    /// Event executing in the sandbox environment.
     #[serde(rename = "TARGET_ENVIRONMENT")]
     Environment,
+    /// Unspecified destination.
     #[serde(rename = "TARGET_UNSPECIFIED")]
     Unspecified,
+    /// Unknown destination.
     #[serde(rename = "UNKNOWN")]
     Unknown,
 }
 
+/// Lifecycle execution status of a trajectory step.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StepStatus {
+    /// Active/running state.
     #[serde(rename = "ACTIVE")]
     Active,
+    /// Completed successfully.
     #[serde(rename = "DONE")]
     Done,
+    /// Waiting for user response/confirmation.
     #[serde(rename = "WAITING_FOR_USER")]
     WaitingForUser,
+    /// Finished with a fatal error.
     #[serde(rename = "ERROR")]
     Error,
+    /// Execution was canceled.
     #[serde(rename = "CANCELED")]
     Canceled,
+    /// Unknown status.
     #[serde(rename = "UNKNOWN")]
     Unknown,
 }
 
+/// Individual step event recording an action in the agent's history trajectory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
+    /// Unique identifier for this step.
     pub id: String,
+    /// Positional index in the trajectory sequence.
     pub step_index: u32,
+    /// Functional type of the step.
     pub r#type: StepType,
+    /// Originating author.
     pub source: StepSource,
+    /// Destination target.
     pub target: StepTarget,
+    /// Execution status.
     pub status: StepStatus,
+    /// Main text/markdown content associated with the step.
     pub content: String,
+    /// Text difference delta relative to previous steps.
     pub content_delta: String,
+    /// Reasoning thoughts generated for this step.
     pub thinking: String,
+    /// Thinking reasoning difference delta relative to previous steps.
     pub thinking_delta: String,
+    /// Custom tool executions registered in this step.
     pub tool_calls: Vec<ToolCall>,
+    /// Captured execution errors.
     pub error: String,
+    /// True if this represents the final response segment from the model.
     pub is_complete_response: Option<bool>,
+    /// Parsed structured JSON output.
     pub structured_output: Option<Value>,
+    /// Token usage details.
     pub usage_metadata: Option<UsageMetadata>,
-    // LocalConnectionStep specific fields
+    /// Unique identifier of the execution cascade grouping subagents.
     #[serde(default)]
     pub cascade_id: String,
+    /// Sub-agent trajectory grouping identifier.
     #[serde(default)]
     pub trajectory_id: String,
+    /// HTTP status code (if from a network action).
     #[serde(default)]
     pub http_code: u32,
 }
@@ -343,56 +472,92 @@ impl Default for Step {
     }
 }
 
+/// The result returned by a middleware hook.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HookResult {
+    /// True if the operation is allowed to proceed.
     pub allow: bool,
+    /// Diagnostic or error message details.
     #[serde(default)]
     pub message: String,
 }
 
+/// Individual multiple-choice or freeform answer to an interactive user question.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuestionResponse {
+    /// Selected index choices (if multiple-choice).
     pub selected_option_ids: Option<Vec<String>>,
+    /// Freeform response text.
     #[serde(default)]
     pub freeform_response: String,
+    /// True if the question was skipped.
     #[serde(default)]
     pub skipped: bool,
 }
 
+/// Complete collection of responses answered to a set of interactive questions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuestionHookResult {
+    /// List of user responses.
     pub responses: Vec<QuestionResponse>,
+    /// True if the question panel dialogue was canceled.
     #[serde(default)]
     pub cancelled: bool,
 }
 
+/// Single choice option in a multiple-choice question.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskQuestionOption {
+    /// Unique identifier for this choice option.
     pub id: String,
+    /// Visual label text for the choice.
     pub text: String,
 }
 
+/// Interactive user question entry structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskQuestionEntry {
+    /// Main question prompt text.
     pub question: String,
+    /// List of multiple-choice options.
     pub options: Vec<AskQuestionOption>,
+    /// True if multiple selections are supported.
     #[serde(default)]
     pub is_multi_select: bool,
 }
 
+/// Final summary outcome of a chat interaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
+    /// Combined text output returned.
     pub text: String,
+    /// Combined reasoning thoughts.
     pub thinking: String,
+    /// Sequence of intermediate execution steps.
     pub steps: Vec<Step>,
+    /// Token usage metrics.
     pub usage_metadata: UsageMetadata,
 }
 
+/// Streaming fragment sent over chunk-based event listeners.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "chunk_type")]
 pub enum StreamChunk {
-    Thought { step_index: u32, text: String },
-    Text { step_index: u32, text: String },
+    /// Streaming thinking fragment.
+    Thought {
+        /// Step index identifier.
+        step_index: u32,
+        /// Thinking segment.
+        text: String,
+    },
+    /// Streaming text response fragment.
+    Text {
+        /// Step index identifier.
+        step_index: u32,
+        /// Text segment.
+        text: String,
+    },
+    /// Complete parsed tool call definition.
     ToolCall(ToolCall),
 }
 

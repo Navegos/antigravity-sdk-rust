@@ -1,27 +1,44 @@
+//! Lifecycle event hooks for the agent execution loop.
+//!
+//! This module defines the [`Hook`] trait, which allows implementing custom observers and middlewares
+//! to intercept session startup, pre/post tool invocations, execution errors, and user interactions.
+
 use crate::types::{AskQuestionEntry, HookResult, QuestionHookResult, ToolCall, ToolResult};
 use async_trait::async_trait;
 use std::sync::Arc;
 
+/// Trait representing an active interceptor of agent lifecycle events.
+///
+/// Implementors can register hooks via [`Agent::register_hook`](crate::agent::Agent::register_hook)
+/// to audit tool invocations, log events, or restrict actions dynamically.
 #[async_trait]
 pub trait Hook: Send + Sync {
+    /// Triggered when the agent establishes a connection and starts a session.
     async fn on_session_start(&self) -> Result<(), anyhow::Error> {
         Ok(())
     }
+    /// Intercepts the start of a user turn before the LLM processes the prompt.
+    /// Returns `allow: false` to halt execution.
     async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
         Ok(HookResult {
             allow: true,
             message: String::new(),
         })
     }
+    /// Intercepts a tool call immediately before it is executed by the runner.
+    /// Returns `allow: false` to prevent execution.
     async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
         Ok(HookResult {
             allow: true,
             message: String::new(),
         })
     }
+    /// Triggered after a tool successfully returns a result.
     async fn post_tool_call(&self, _result: &ToolResult) -> Result<(), anyhow::Error> {
         Ok(())
     }
+    /// Triggered when a tool execution encounters an error.
+    /// Allows fallback logic or customized error payloads.
     async fn on_tool_error(
         &self,
         error: &anyhow::Error,
@@ -34,6 +51,7 @@ pub trait Hook: Send + Sync {
             None,
         ))
     }
+    /// Intercepts a prompt to ask the user clarifying questions.
     async fn on_interaction(
         &self,
         _questions: &[AskQuestionEntry],
@@ -42,6 +60,7 @@ pub trait Hook: Send + Sync {
     }
 }
 
+/// Internal helper that manages a collection of registered [`Hook`]s and dispatches events sequentially.
 #[derive(Clone, Default)]
 pub struct HookRunner {
     hooks: Arc<tokio::sync::RwLock<Vec<Arc<dyn Hook>>>>,
@@ -56,6 +75,7 @@ impl std::fmt::Debug for HookRunner {
 }
 
 impl HookRunner {
+    /// Creates a new, empty `HookRunner`.
     pub fn new() -> Self {
         Self {
             hooks: Arc::new(tokio::sync::RwLock::new(Vec::new())),

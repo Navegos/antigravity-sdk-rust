@@ -1,7 +1,17 @@
+//! Connection abstractions for communication with the agent execution harness.
+//!
+//! This module defines the [`Connection`] trait, which provides a transport-agnostic interface
+//! for sending prompts, receiving step updates, and executing tool and question handshakes.
+
 use crate::types::{QuestionHookResult, Step, ToolResult};
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
 
+/// Trait representing an active session connection with the agentic harness.
+///
+/// A connection manages process or network lifecycle, handshaking, and event streaming.
+/// Common implementations include [`LocalConnection`](crate::local::LocalConnection) which spawns
+/// a local helper subprocess and upgrades communication to a WebSocket protocol.
 #[async_trait]
 pub trait Connection: Send + Sync {
     /// Returns the conversation ID for the connection.
