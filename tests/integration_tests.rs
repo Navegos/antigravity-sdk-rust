@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::field_reassign_with_default)]
 
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::policy;
@@ -77,3 +77,23 @@ async fn test_agent_chat_integration() {
     // 5. Stop agent
     agent.stop().await.expect("Failed to stop agent");
 }
+
+#[tokio::test]
+async fn test_agent_start_mutually_exclusive_capabilities() {
+    let mut config = AgentConfig::default();
+    config.binary_path = Some("some_path".to_string());
+    config.capabilities = CapabilitiesConfig {
+        enabled_tools: Some(vec![BuiltinTools::ViewFile]),
+        disabled_tools: Some(vec![BuiltinTools::RunCommand]),
+        compaction_threshold: None,
+        image_model: None,
+        finish_tool_schema_json: None,
+    };
+
+    let mut agent = Agent::new(config);
+    let result = agent.start().await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("mutually exclusive"));
+}
+

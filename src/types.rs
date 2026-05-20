@@ -395,3 +395,147 @@ pub enum StreamChunk {
     Text { step_index: u32, text: String },
     ToolCall(ToolCall),
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::field_reassign_with_default)]
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_tool_call_construction() {
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            args: json!({"path": "/tmp/foo"}),
+            canonical_path: None,
+        };
+        assert_eq!(tc.name, "read_file");
+        assert_eq!(tc.args["path"], "/tmp/foo");
+        assert_eq!(tc.id, "call_1");
+        assert_eq!(tc.canonical_path, None);
+    }
+
+    #[test]
+    fn test_tool_call_serialization() {
+        let json_data = r#"{"id":"call_1","name":"read_file","args":{"path":"/tmp/foo"}}"#;
+        let tc: ToolCall = serde_json::from_str(json_data).unwrap();
+        assert_eq!(tc.name, "read_file");
+        assert_eq!(tc.args["path"], "/tmp/foo");
+        assert_eq!(tc.id, "call_1");
+        assert_eq!(tc.canonical_path, None);
+    }
+
+    #[test]
+    fn test_tool_result_success() {
+        let tr = ToolResult {
+            name: "sum_tool".to_string(),
+            id: Some("call_1".to_string()),
+            result: Some(json!(42)),
+            error: None,
+        };
+        assert_eq!(tr.name, "sum_tool");
+        assert_eq!(tr.result.unwrap(), 42);
+        assert!(tr.error.is_none());
+        assert_eq!(tr.id.unwrap(), "call_1");
+    }
+
+    #[test]
+    fn test_tool_result_error() {
+        let tr = ToolResult {
+            name: "bad_tool".to_string(),
+            id: None,
+            result: None,
+            error: Some("kaboom".to_string()),
+        };
+        assert_eq!(tr.name, "bad_tool");
+        assert!(tr.result.is_none());
+        assert_eq!(tr.error.unwrap(), "kaboom");
+        assert!(tr.id.is_none());
+    }
+
+    #[test]
+    fn test_tool_result_mutability() {
+        let mut tr = ToolResult {
+            name: "tool".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        tr.result = Some(json!("updated"));
+        assert_eq!(tr.result.unwrap(), "updated");
+    }
+
+    #[test]
+    fn test_step_defaults() {
+        let step = Step::default();
+        assert_eq!(step.id, "");
+        assert_eq!(step.step_index, 0);
+        assert!(matches!(step.r#type, StepType::Unknown));
+        assert!(matches!(step.status, StepStatus::Unknown));
+        assert!(matches!(step.source, StepSource::Unknown));
+        assert_eq!(step.content, "");
+        assert!(step.tool_calls.is_empty());
+        assert_eq!(step.error, "");
+    }
+
+    #[test]
+    fn test_step_mutability() {
+        let mut step = Step::default();
+        step.content = "goodbye".to_string();
+        assert_eq!(step.content, "goodbye");
+    }
+
+    #[test]
+    fn test_hook_result_defaults() {
+        let hr = HookResult::default();
+        assert!(!hr.allow); // derived default for bool in Rust is false
+        assert_eq!(hr.message, "");
+    }
+
+    #[test]
+    fn test_question_response_defaults() {
+        let qr = QuestionResponse {
+            selected_option_ids: None,
+            freeform_response: String::new(),
+            skipped: false,
+        };
+        assert!(qr.selected_option_ids.is_none());
+        assert_eq!(qr.freeform_response, "");
+        assert!(!qr.skipped);
+    }
+
+    #[test]
+    fn test_question_response_skipped() {
+        let qr = QuestionResponse {
+            selected_option_ids: None,
+            freeform_response: String::new(),
+            skipped: true,
+        };
+        assert!(qr.skipped);
+    }
+
+    #[test]
+    fn test_gemini_config_defaults() {
+        let config = GeminiConfig::default();
+        assert!(config.api_key.is_none());
+        assert_eq!(config.models.default.name, DEFAULT_MODEL);
+        assert!(config.models.default.generation.thinking_level.is_none());
+    }
+
+    #[test]
+    fn test_thinking_level_serialization() {
+        let level = ThinkingLevel::Low;
+        let json_str = serde_json::to_string(&level).unwrap();
+        assert_eq!(json_str, "\"low\"");
+    }
+
+    #[test]
+    fn test_capabilities_config_defaults() {
+        let config = CapabilitiesConfig::default();
+        assert!(config.enabled_tools.is_none());
+        assert!(config.disabled_tools.is_none());
+        assert!(config.compaction_threshold.is_none());
+    }
+}
+

@@ -46,6 +46,8 @@ module_name_repetitions = "allow"
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
+return_self_not_must_use = "allow"
+uninlined_format_args = "allow"
 # Let type_complexity slide where generated proto bindings or complex callbacks dictate it
 type_complexity = "allow"
 
