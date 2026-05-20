@@ -4,10 +4,14 @@ The Google Antigravity SDK is a Rust library for building AI agents powered by A
 
 ## Installation
 
-1. Add the SDK to your `Cargo.toml`:
+1. Add the SDK to your project using Cargo:
+   ```sh
+   cargo add antigravity-sdk-rust
+   ```
+   Or add it manually to your `Cargo.toml`:
    ```toml
    [dependencies]
-   antigravity-sdk-rust = { path = "path/to/antigravity-sdk-rust" }
+   antigravity-sdk-rust = "0.1.0"
    tokio = { version = "1", features = ["full"] }
    ```
 
@@ -156,6 +160,31 @@ let policies = vec![
     policy::allow("VIEW_FILE"),                  // Allow reading/viewing files
 ];
 ```
+
+## Local Development
+
+This project uses [just](https://github.com/casey/just) to manage development tasks.
+
+- **Check Code Quality**: Run all style, lint, and test checks.
+  ```sh
+  just check
+  ```
+- **Install Local Harness**: Download and configure the required `localharness` binary.
+  ```sh
+  just install
+  ```
+- **Bump version & Release tag**: Bump the package version, update Cargo.lock, commit using `--no-verify` (skipping git hooks), and tag the release.
+  ```sh
+  # Auto-bump patch version (e.g., 0.1.0 -> 0.1.1)
+  just version
+  
+  # Or force/override with a specific version
+  just version 0.2.0
+  ```
+- **Publish to Crates.io**: Manually publish the package to crates.io (runs `just check` first).
+  ```sh
+  just publish
+  ```
 
 ## Architecture
 
