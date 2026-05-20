@@ -21,6 +21,7 @@ wasm-bindgen = { version = "=0.2.103", optional = true }
 web-sys = { version = "0.3", features = ["Storage", "Window"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+antigravity-sdk-rust = { path = "../..", optional = true }
 
 [workspace]
 
@@ -35,6 +36,7 @@ ssr = [
   "dep:spin-sdk",
   "dep:leptos_wasi",
   "dep:wasi",
+  "dep:antigravity-sdk-rust",
 ]
 
 [package.metadata.leptos]

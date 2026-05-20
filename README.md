@@ -166,6 +166,63 @@ let policies = vec![
 ];
 ```
 
+## Web Integration
+
+The SDK provides two patterns for building web applications with AI agents:
+
+### Leptos + Axum (Native)
+
+For standard web servers (VPS, Docker, bare metal). The Agent runs in-process with full SDK features.
+
+```sh
+cd examples/leptos_axum
+echo "GEMINI_API_KEY=your-key" > .env
+cargo leptos serve
+# Open http://localhost:3000
+```
+
+### Leptos + Spin/WASI (Edge)
+
+For edge/serverless deployments on [Fermyon Spin](https://www.fermyon.com/spin). Since Spin components cannot make outbound TCP/WebSocket connections, two modes are supported:
+
+**Sidecar Mode (Full SDK):**
+```sh
+# Terminal 1: Start the agent sidecar
+cd examples/agent_server
+GEMINI_API_KEY=your-key cargo run
+
+# Terminal 2: Start Spin
+cd examples/leptos_ssr_axum
+spin build --up
+# Open http://localhost:3000
+```
+
+**Direct Mode (Lightweight, no sidecar):**
+```sh
+cd examples/leptos_ssr_axum
+spin build --up --variable gemini_api_key="your-key"
+```
+
+> See [`examples/README.md`](examples/README.md) for detailed architecture diagrams and configuration options.
+
+### GeminiDirectClient
+
+For environments where TCP/WebSocket is unavailable (e.g. WASI, embedded), the SDK provides a transport-agnostic Gemini API client that builds HTTP request payloads and parses responses — the caller provides the HTTP transport:
+
+```rust
+use antigravity_sdk_rust::direct::{GeminiDirectClient, ChatEntry};
+use antigravity_sdk_rust::types::GeminiConfig;
+
+let client = GeminiDirectClient::new(&GeminiConfig::default())
+    .with_system_instruction("You are a helpful assistant.".to_string());
+
+// Build the request (URL, headers, body) — send via your HTTP client
+let request = client.build_request("your-api-key", "Hello!", &[]).unwrap();
+
+// Parse the response
+let text = GeminiDirectClient::parse_response(&response_bytes).unwrap();
+```
+
 ## Local Development
 
 This project uses [just](https://github.com/casey/just) to manage development tasks.
@@ -193,10 +250,8 @@ This project uses [just](https://github.com/casey/just) to manage development ta
 
 ## Architecture
 
-For more information, see [ARCHITECTURE.md](file:///Volumes/goldcoders/antigravity-sdk-rust/ARCHITECTURE.md).
+For more information, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-
-
