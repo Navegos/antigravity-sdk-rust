@@ -138,3 +138,41 @@ body {
   border-top-color: #2f2f2f;
 }
 
+/* Table styles */
+.markdown-content table {
+  width: 100%;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.875rem;
+}
+
+.markdown-content th,
+.markdown-content td {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #e5e5e7;
+}
+
+.markdown-content th {
+  font-weight: 600;
+  background-color: #f7f7f8;
+}
+
+.markdown-content tr:hover {
+  background-color: #f9f9f9;
+}
+
+.dark .markdown-content th,
+.dark .markdown-content td {
+  border-bottom-color: #2f2f2f;
+}
+
+.dark .markdown-content th {
+  background-color: #171717;
+}
+
+.dark .markdown-content tr:hover {
+  background-color: rgba(47, 47, 47, 0.3);
+}
+

@@ -68,6 +68,7 @@ fn ChatPage() -> impl IntoView {
     let (input_text, set_input_text) = signal(String::new());
     let (error_text, set_error_text) = signal(Option::<String>::None);
     let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
+    let messages_container_ref = NodeRef::<leptos::html::Div>::new();
 
     // Theme and Sidebar layout signals
     let (dark_mode, set_dark_mode) = signal(true);
@@ -90,6 +91,21 @@ fn ChatPage() -> impl IntoView {
                         set_dark_mode.set(val == "dark");
                     }
                 }
+            }
+        }
+    });
+
+    // Auto-scroll messages container to bottom when messages or streaming content updates
+    Effect::new(move |_| {
+        let _ = messages.get();
+        let _ = streaming_content.get();
+        #[cfg(feature = "hydrate")]
+        {
+            if let Some(el) = messages_container_ref.get() {
+                request_animation_frame(move || {
+                    let scroll_height = el.scroll_height();
+                    el.set_scroll_top(scroll_height);
+                });
             }
         }
     });
@@ -437,7 +453,7 @@ fn ChatPage() -> impl IntoView {
                 </header>
 
                 // Messages Viewport
-                <div class="flex-1 overflow-y-auto" id="chat-messages-container">
+                <div class="flex-1 overflow-y-auto" id="chat-messages-container" node_ref=messages_container_ref>
                     // Empty State Container
                     <Show when=move || messages.get().is_empty() && !is_streaming.get()>
                         <div class="max-w-3xl mx-auto w-full px-4 h-full flex flex-col items-center justify-center text-center py-20">
@@ -882,7 +898,7 @@ pub async fn clear_messages() -> Result<(), ServerFnError<String>> {
 
 /// Parse markdown text into HTML string.
 fn render_markdown(markdown: &str) -> String {
-    let parser = pulldown_cmark::Parser::new(markdown);
+    let parser = pulldown_cmark::Parser::new_ext(markdown, pulldown_cmark::Options::all());
     let mut html_output = String::new();
     pulldown_cmark::html::push_html(&mut html_output, parser);
     html_output
