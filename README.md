@@ -9,15 +9,10 @@ The Google Antigravity SDK is a Rust library for building AI agents powered by A
 
 ## Installation
 
-1. Add the SDK to your project using Cargo:
+1. Add the SDK and tokio to your project:
    ```sh
    cargo add antigravity-sdk-rust
-   ```
-   Or add it manually to your `Cargo.toml`:
-   ```toml
-   [dependencies]
-   antigravity-sdk-rust = "0.1.0"
-   tokio = { version = "1", features = ["full"] }
+   cargo add tokio --features full
    ```
 
 2. **Obtain the `localharness` binary:**
