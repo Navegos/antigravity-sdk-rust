@@ -56,10 +56,6 @@ The SDK leverages several object-oriented and functional design patterns:
 ### 5. Background Trigger Pattern (`triggers.rs`)
 - **Trigger Trait**: Defines asynchronous background tasks (such as status polling, listener intervals, etc.) that can interact with the connection session concurrently.
 - **TriggerRunner**: Coordinates and spawns registered triggers in separate tasks when the agent session starts.
-
-### 6. Direct Gemini Client (`direct.rs`)
-- **GeminiDirectClient**: A transport-agnostic client that constructs REST request payloads and parses responses directly from the Gemini API. Bypasses the `localharness` and WebSocket loop entirely. It is helpful for environments where TCP/WebSocket or spawning subprocesses is not possible (e.g. lightweight WASI components).
-
 ---
 
 ## Component Details

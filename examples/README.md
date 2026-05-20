@@ -59,11 +59,7 @@ Browser → Axum Server (native)
 
 **Path:** `leptos_ssr_axum/`
 
-A chat application that runs as a [Spin](https://www.fermyon.com/spin) WebAssembly component. Since Spin components cannot make outbound TCP/WebSocket connections (only `wasi:http`), this example supports **two modes**:
-
-#### Mode A: Sidecar Mode (Full SDK — Recommended)
-
-Uses the [`agent_server`](#4-agent-server-sidecar) sidecar to get full SDK features. The Spin component calls the sidecar via HTTP.
+A chat application that runs as a [Spin](https://www.fermyon.com/spin) WebAssembly component. Since Spin components cannot make outbound TCP/WebSocket connections (only `wasi:http`), this example runs in **Sidecar Mode** using the [`agent_server`](#4-agent-server-sidecar) sidecar to get full SDK features (harness, tools, hooks, and policies).
 
 ```sh
 # Terminal 1: Start the sidecar (runs full SDK + localharness)
@@ -86,28 +82,6 @@ Browser → Spin Component (WASI)
                │
                └─ KV Store (chat history)
 ```
-
-#### Mode B: Direct Mode (Lightweight, No Sidecar)
-
-Calls the Gemini API directly using the SDK's `GeminiDirectClient`. No localharness or sidecar needed. Simpler to deploy but without tools, hooks, or policies.
-
-```sh
-cd examples/leptos_ssr_axum
-spin build --up --variable gemini_api_key="your-key"
-```
-
-**Architecture:**
-```
-Browser → Spin Component (WASI)
-               │
-               ├─ GeminiDirectClient::build_request()
-               ├─ wasi::http → Gemini REST API
-               ├─ GeminiDirectClient::parse_response()
-               │
-               └─ KV Store (chat history)
-```
-
-> **How does the mode get selected?** If the `gemini_api_key` Spin variable is set (non-empty), Direct Mode is used. Otherwise, Sidecar Mode is used (calls `agent_server_url`, which defaults to `http://127.0.0.1:8080`).
 
 ---
 

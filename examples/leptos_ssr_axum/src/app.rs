@@ -364,20 +364,14 @@ fn send_wasi_http_post(
 
     Ok((status, resp_bytes))
 }
-
 /// Send a message via the antigravity-sdk-rust Agent sidecar server (full SDK)
-/// or fall back to `GeminiDirectClient` (direct Gemini API) if `gemini_api_key` is set.
 ///
-/// **Sidecar mode** (default): calls `POST /chat` on the `agent_server` binary which
-/// runs the full SDK with localharness, tools, hooks, and policies.
-///
-/// **Direct mode** (fallback): if `gemini_api_key` is provided in Spin variables,
-/// calls the Gemini API directly using `GeminiDirectClient`.
+/// Calls `POST /chat` on the `agent_server` binary which runs the full SDK with
+/// localharness, tools, hooks, and policies.
 #[server(prefix = "/api")]
 pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<String>> {
     let agent_server_url = spin_sdk::variables::get("agent_server_url")
         .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
-    let gemini_api_key = spin_sdk::variables::get("gemini_api_key").unwrap_or_default();
 
     // Load chat history from KV store
     let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
@@ -386,82 +380,34 @@ pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<
         _ => Vec::new(),
     };
 
-    let text = if !gemini_api_key.trim().is_empty() {
-        // ── Direct Mode: GeminiDirectClient (no sidecar needed) ──
-        use antigravity_sdk_rust::direct::{ChatEntry, GeminiDirectClient};
-        use antigravity_sdk_rust::types::GeminiConfig;
+    // ── Sidecar Mode: Full SDK via agent_server ──
+    let body = serde_json::to_vec(&serde_json::json!({ "message": message }))
+        .map_err(|e| e.to_string())?;
 
-        let chat_history: Vec<ChatEntry> = history
-            .iter()
-            .map(|msg| ChatEntry {
-                role: if msg.role == "user" {
-                    "user".to_string()
-                } else {
-                    "model".to_string()
-                },
-                content: msg.content.clone(),
-            })
-            .collect();
+    let headers = vec![("content-type".to_string(), b"application/json".to_vec())];
 
-        let mut gemini_config = GeminiConfig::default();
-        gemini_config.models.default.name = "gemini-3.5-flash".to_string();
+    // Parse the sidecar URL to extract scheme/authority
+    let (scheme, authority) = parse_url_parts(&agent_server_url);
 
-        let client = GeminiDirectClient::new(&gemini_config).with_system_instruction(
-            "You are a helpful AI assistant in a chat interface. \
-             Keep responses concise and conversational. \
-             Use markdown formatting when helpful."
-                .to_string(),
-        );
+    let (status, resp_bytes) =
+        send_wasi_http_post(&scheme, &authority, "/chat", &headers, &body)?;
 
-        let request = client
-            .build_request(gemini_api_key.trim(), &message, &chat_history)
-            .map_err(|e| e.to_string())?;
+    if status != 200 {
+        let err_text = String::from_utf8_lossy(&resp_bytes);
+        return Err(ServerFnError::ServerError(format!(
+            "Agent sidecar error ({}): {}",
+            status, err_text
+        )));
+    }
 
-        let (status, resp_bytes) = send_wasi_http_post(
-            &request.scheme,
-            &request.authority,
-            &request.path,
-            &request.headers,
-            &request.body,
-        )?;
+    // Parse sidecar response: { "text": "...", "conversation_id": "..." }
+    let resp_json: serde_json::Value =
+        serde_json::from_slice(&resp_bytes).map_err(|e| e.to_string())?;
 
-        if status != 200 {
-            return Err(ServerFnError::ServerError(
-                GeminiDirectClient::parse_error(status, &resp_bytes),
-            ));
-        }
-
-        GeminiDirectClient::parse_response(&resp_bytes).map_err(|e| e.to_string())?
-    } else {
-        // ── Sidecar Mode: Full SDK via agent_server ──
-        let body = serde_json::to_vec(&serde_json::json!({ "message": message }))
-            .map_err(|e| e.to_string())?;
-
-        let headers = vec![("content-type".to_string(), b"application/json".to_vec())];
-
-        // Parse the sidecar URL to extract scheme/authority
-        let (scheme, authority) = parse_url_parts(&agent_server_url);
-
-        let (status, resp_bytes) =
-            send_wasi_http_post(&scheme, &authority, "/chat", &headers, &body)?;
-
-        if status != 200 {
-            let err_text = String::from_utf8_lossy(&resp_bytes);
-            return Err(ServerFnError::ServerError(format!(
-                "Agent sidecar error ({}): {}",
-                status, err_text
-            )));
-        }
-
-        // Parse sidecar response: { "text": "...", "conversation_id": "..." }
-        let resp_json: serde_json::Value =
-            serde_json::from_slice(&resp_bytes).map_err(|e| e.to_string())?;
-
-        resp_json["text"]
-            .as_str()
-            .unwrap_or("(No response)")
-            .to_string()
-    };
+    let text = resp_json["text"]
+        .as_str()
+        .unwrap_or("(No response)")
+        .to_string();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

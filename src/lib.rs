@@ -65,7 +65,6 @@ pub mod proto {
 pub mod agent;
 pub mod connection;
 pub mod conversation;
-pub mod direct;
 pub mod hooks;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod local;
