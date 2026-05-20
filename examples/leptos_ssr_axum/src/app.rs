@@ -58,6 +58,7 @@ fn ChatPage() -> impl IntoView {
     // Chat messages state
     let (messages, set_messages) = signal(Vec::<ChatMessage>::new());
     let (input_text, set_input_text) = signal(String::new());
+    let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
 
     // Load existing messages from KV store on mount
     let initial_messages = Resource::new(|| (), |_| get_messages());
@@ -99,6 +100,9 @@ fn ChatPage() -> impl IntoView {
 
         // Clear input
         set_input_text.set(String::new());
+        if let Some(el) = textarea_ref.get() {
+            el.set_value("");
+        }
 
         // Dispatch to server
         send_action.dispatch(SendMessage { message: trimmed });
@@ -123,6 +127,9 @@ fn ChatPage() -> impl IntoView {
                 msgs.push(user_msg);
             });
             set_input_text.set(String::new());
+            if let Some(el) = textarea_ref.get() {
+                el.set_value("");
+            }
             send_action.dispatch(SendMessage { message: trimmed });
         }
     };
@@ -226,6 +233,7 @@ fn ChatPage() -> impl IntoView {
             <div class="bg-[#1a2332] border-t border-[#2a3a4c] px-4 py-4 shrink-0">
                 <div class="max-w-3xl mx-auto flex gap-3">
                     <textarea
+                        node_ref=textarea_ref
                         prop:value=move || input_text.get()
                         on:input=move |ev| set_input_text.set(event_target_value(&ev))
                         on:keydown=on_keydown
@@ -279,10 +287,10 @@ fn NotFound() -> impl IntoView {
 fn call_gemini(api_key: &str, contents: &serde_json::Value) -> Result<String, String> {
     use wasi::http::types::{Fields, Method, OutgoingBody, OutgoingRequest, Scheme};
 
-    let model = "gemini-2.5-flash";
+    let model = "gemini-3.5-flash";
     let path_and_query = format!(
-        "/v1beta/models/{}:generateContent?key={}",
-        model, api_key
+        "/v1beta/models/{}:generateContent",
+        model
     );
 
     let request_body = serde_json::json!({
@@ -295,10 +303,11 @@ fn call_gemini(api_key: &str, contents: &serde_json::Value) -> Result<String, St
 
     let body_bytes = serde_json::to_vec(&request_body).map_err(|e| e.to_string())?;
 
-    // Build the request using the wasi:http types
+    // Build the request — API key goes in header, not query string,
+    // to avoid WASI path validator rejecting special characters.
     let headers = Fields::from_list(&[
         ("content-type".to_string(), "application/json".into()),
-        ("content-length".to_string(), body_bytes.len().to_string().into()),
+        ("x-goog-api-key".to_string(), api_key.as_bytes().to_vec()),
     ]).map_err(|e| format!("Failed to create headers: {e:?}"))?;
 
     let outgoing_req = OutgoingRequest::new(headers);
@@ -375,8 +384,9 @@ fn call_gemini(api_key: &str, contents: &serde_json::Value) -> Result<String, St
 /// Send a message to the Gemini API and get a response.
 #[server(prefix = "/api")]
 pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<String>> {
-    let api_key = std::env::var("GEMINI_API_KEY")
-        .map_err(|_| "GEMINI_API_KEY not set".to_string())?;
+    let api_key = spin_sdk::variables::get("gemini_api_key")
+        .map_err(|e| format!("Failed to get gemini_api_key variable: {e}"))?;
+    let api_key = api_key.trim().to_string();
 
     // Load chat history for context
     let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;

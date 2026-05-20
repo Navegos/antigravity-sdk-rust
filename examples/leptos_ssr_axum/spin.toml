@@ -17,7 +17,8 @@ component = "leptos-ssr-axum"
 source = "target/wasm32-wasip1/release/leptos_ssr_axum.wasm"
 allowed_outbound_hosts = ["https://generativelanguage.googleapis.com"]
 key_value_stores = ["default"]
-environment = { GEMINI_API_KEY = "{{ gemini_api_key }}" }
+[component.leptos-ssr-axum.variables]
+gemini_api_key = "{{ gemini_api_key }}"
 [component.leptos-ssr-axum.build]
 command = "cargo leptos build --release && LEPTOS_OUTPUT_NAME=leptos_ssr_axum cargo build --lib --target wasm32-wasip1 --release --no-default-features --features ssr"
 watch = ["src/**/*.rs", "Cargo.toml"]
