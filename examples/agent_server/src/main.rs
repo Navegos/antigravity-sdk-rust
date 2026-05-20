@@ -30,6 +30,9 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use futures_util::StreamExt;
+use std::convert::Infallible;
 
 /// Shared application state containing the SDK Agent.
 type AgentState = Arc<Agent<Started>>;
@@ -37,6 +40,12 @@ type AgentState = Arc<Agent<Started>>;
 /// Request body for the `/chat` endpoint.
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
+    message: String,
+}
+
+/// Query parameters for the `/chat/stream` endpoint.
+#[derive(Debug, Deserialize)]
+struct ChatStreamParams {
     message: String,
 }
 
@@ -71,6 +80,61 @@ async fn chat_handler(
             )
         }
     }
+}
+
+/// GET /chat/stream — Send a message and stream the response back via Server-Sent Events (SSE).
+async fn chat_stream_handler(
+    State(agent): State<AgentState>,
+    axum::extract::Query(params): axum::extract::Query<ChatStreamParams>,
+) -> impl IntoResponse {
+    let conversation = agent.conversation();
+
+    let stream_res = conversation.chat(&params.message).await;
+
+    let sse_stream: futures_util::stream::BoxStream<'static, Result<Event, Infallible>> = match stream_res {
+        Ok(stream) => {
+            let sse = stream.map(|chunk_res| {
+                match chunk_res {
+                    Ok(chunk) => {
+                        match chunk {
+                            antigravity_sdk_rust::types::StreamChunk::Text { text, .. } => {
+                                Ok(Event::default().event("token").json_data(serde_json::json!({ "text": text })).unwrap())
+                            }
+                            antigravity_sdk_rust::types::StreamChunk::Thought { text, .. } => {
+                                Ok(Event::default().event("thought").json_data(serde_json::json!({ "text": text })).unwrap())
+                            }
+                            antigravity_sdk_rust::types::StreamChunk::ToolCall(call) => {
+                                Ok(Event::default().event("tool").json_data(serde_json::json!({
+                                    "name": call.name,
+                                    "args": call.args,
+                                })).unwrap())
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        Ok(Event::default().event("error").data(format!("{e}")))
+                    }
+                }
+            });
+
+            let done_event = futures_util::stream::once(async {
+                Ok(Event::default()
+                    .event("done")
+                    .json_data(serde_json::json!({}))
+                    .unwrap())
+            });
+
+            sse.chain(done_event).boxed()
+        }
+        Err(e) => {
+            let error_event = futures_util::stream::once(async move {
+                Ok(Event::default().event("error").data(format!("{e}")))
+            });
+            error_event.boxed()
+        }
+    };
+
+    Sse::new(sse_stream).keep_alive(KeepAlive::default())
 }
 
 /// GET /health — Health check endpoint.
@@ -146,6 +210,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/chat", post(chat_handler))
+        .route("/chat/stream", get(chat_stream_handler))
         .route("/health", get(health_handler))
         .layer(cors)
         .with_state(agent_state);

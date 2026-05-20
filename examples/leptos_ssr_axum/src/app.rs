@@ -9,12 +9,15 @@ use crate::types::ChatMessage;
 
 #[cfg(feature = "ssr")]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
+    let agent_url = spin_sdk::variables::get("agent_server_url")
+        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
     view! {
         <!DOCTYPE html>
         <html lang="en">
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
+                <meta name="agent-server-url" content=agent_url />
                 <link rel="preconnect" href="https://fonts.googleapis.com" />
                 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="true" />
                 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -58,7 +61,6 @@ pub fn App() -> impl IntoView {
 /// Chat page component
 #[component]
 fn ChatPage() -> impl IntoView {
-    let send_action = ServerAction::<SendMessage>::new();
     let clear_action = ServerAction::<ClearMessages>::new();
 
     // Chat messages state
@@ -73,6 +75,7 @@ fn ChatPage() -> impl IntoView {
 
     // Monotonic counter for unique message IDs (avoids <For> key collisions).
     let (msg_id_counter, set_msg_id_counter) = signal(0u64);
+    let (is_streaming, set_is_streaming) = signal(false);
 
     // Hydration-only mount effect to read theme preference
     Effect::new(move |_| {
@@ -106,6 +109,7 @@ fn ChatPage() -> impl IntoView {
         set_messages.set(Vec::new());
         set_msg_id_counter.set(0);
         set_error_text.set(None);
+        set_is_streaming.set(false);
     };
 
     // Load existing messages from KV store on mount.
@@ -135,34 +139,8 @@ fn ChatPage() -> impl IntoView {
         }
     });
 
-    // When server action completes, append the assistant response.
-    // We track the action version to ensure every completion is handled exactly once,
-    // even if the signal value shape looks "the same" to Leptos's dedup logic.
-    let (handled_version, set_handled_version) = signal(0usize);
-    Effect::new(move |_| {
-        let v = send_action.version().get();
-        let handled = handled_version.get_untracked();
-        if v > handled {
-            set_handled_version.set(v);
-            match send_action.value().get_untracked() {
-                Some(Ok(mut assistant_msg)) => {
-                    let id = msg_id_counter.get_untracked();
-                    set_msg_id_counter.set(id + 1);
-                    assistant_msg.id = id;
-                    set_messages.update(|msgs| msgs.push(assistant_msg));
-                    set_error_text.set(None);
-                }
-                Some(Err(e)) => {
-                    let err = match e {
-                        ServerFnError::ServerError(s) => s,
-                        other => format!("{other}"),
-                    };
-                    set_error_text.set(Some(err));
-                }
-                None => {}
-            }
-        }
-    });
+    // We no longer use send_action for browser-side chat turns.
+    // Instead we use direct SSE streaming below.
 
     // Shared send logic — used by both click and Enter key handlers.
     let do_send = move || {
@@ -194,8 +172,108 @@ fn ChatPage() -> impl IntoView {
         // Clear any previous error
         set_error_text.set(None);
 
-        // Dispatch to server
-        send_action.dispatch(SendMessage { message: trimmed });
+        // Set streaming state
+        set_is_streaming.set(true);
+
+        #[cfg(feature = "hydrate")]
+        {
+            use wasm_bindgen::prelude::Closure;
+            use wasm_bindgen::JsCast;
+            use web_sys::{EventSource, MessageEvent};
+
+            let agent_url = get_agent_server_url();
+            let encoded_msg = get_agent_server_url_encoded(&trimmed);
+            let url = format!("{}/chat/stream?message={}", agent_url, encoded_msg);
+
+            match EventSource::new(&url) {
+                Ok(es) => {
+                    // Create an empty assistant message in messages
+                    let assistant_id = msg_id_counter.get_untracked();
+                    set_msg_id_counter.set(assistant_id + 1);
+
+                    let assistant_msg = ChatMessage {
+                        id: assistant_id,
+                        role: "assistant".to_string(),
+                        content: String::new(),
+                        timestamp: 0,
+                    };
+                    set_messages.update(|msgs| msgs.push(assistant_msg));
+
+                    let trimmed_clone = trimmed.clone();
+
+                    // Token handler
+                    let on_token = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                        if let Ok(msg_event) = event.dyn_into::<MessageEvent>() {
+                            if let Some(data) = msg_event.data().as_string() {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+                                    if let Some(text) = json["text"].as_str() {
+                                        set_messages.update(|msgs| {
+                                            if let Some(last) = msgs.last_mut() {
+                                                if last.role == "assistant" {
+                                                    last.content.push_str(text);
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }) as Box<dyn FnMut(web_sys::Event)>);
+
+                    // Error handler
+                    let es_err_clone = es.clone();
+                    let on_error = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                        es_err_clone.close();
+                        set_is_streaming.set(false);
+                        if let Ok(msg_event) = event.dyn_into::<MessageEvent>() {
+                            if let Some(data) = msg_event.data().as_string() {
+                                set_error_text.set(Some(data));
+                            } else {
+                                set_error_text.set(Some("Error streaming response".to_string()));
+                            }
+                        } else {
+                            set_error_text.set(Some("Connection lost".to_string()));
+                        }
+                    }) as Box<dyn FnMut(web_sys::Event)>);
+
+                    // Done handler
+                    let es_done_clone = es.clone();
+                    let on_done = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                        es_done_clone.close();
+                        set_is_streaming.set(false);
+
+                        // Grab the accumulated content of the assistant message
+                        let mut final_content = String::new();
+                        let msgs = messages.get_untracked();
+                        if let Some(last) = msgs.last() {
+                            if last.role == "assistant" {
+                                final_content = last.content.clone();
+                            }
+                        }
+
+                        // Call the server function to persist history to KV
+                        let user_content = trimmed_clone.clone();
+                        leptos::task::spawn_local(async move {
+                            if let Err(e) = save_chat_turn(user_content, final_content).await {
+                                eprintln!("Failed to persist message to KV: {:?}", e);
+                            }
+                        });
+                    }) as Box<dyn FnMut(web_sys::Event)>);
+
+                    es.add_event_listener_with_callback("token", on_token.as_ref().unchecked_ref()).unwrap();
+                    es.add_event_listener_with_callback("error", on_error.as_ref().unchecked_ref()).unwrap();
+                    es.add_event_listener_with_callback("done", on_done.as_ref().unchecked_ref()).unwrap();
+
+                    on_token.forget();
+                    on_error.forget();
+                    on_done.forget();
+                }
+                Err(e) => {
+                    set_is_streaming.set(false);
+                    set_error_text.set(Some(format!("Failed to connect to agent server: {:?}", e)));
+                }
+            }
+        }
     };
 
     // Button click handler
@@ -336,7 +414,7 @@ fn ChatPage() -> impl IntoView {
                     // Connection / Status indicator
                     <div class="flex items-center gap-2">
                         <div class={move || {
-                            if send_action.pending().get() {
+                            if is_streaming.get() {
                                 "w-2 h-2 rounded-full bg-[#10a37f] animate-pulse"
                             } else {
                                 "w-2 h-2 rounded-full bg-[#10a37f]"
@@ -344,8 +422,8 @@ fn ChatPage() -> impl IntoView {
                         }}></div>
                         <span class="text-xs text-gray-500 dark:text-gray-400 font-medium">
                             {move || {
-                                if send_action.pending().get() {
-                                    "Thinking"
+                                if is_streaming.get() {
+                                    "Streaming"
                                 } else {
                                     "Ready"
                                 }
@@ -357,7 +435,7 @@ fn ChatPage() -> impl IntoView {
                 // Messages Viewport
                 <div class="flex-1 overflow-y-auto" id="chat-messages-container">
                     // Empty State Container
-                    <Show when=move || messages.get().is_empty() && !send_action.pending().get()>
+                    <Show when=move || messages.get().is_empty() && !is_streaming.get()>
                         <div class="max-w-3xl mx-auto w-full px-4 h-full flex flex-col items-center justify-center text-center py-20">
                             <h2 class="text-[#0d0d0d] dark:text-white text-3xl font-semibold mb-8 tracking-tight">
                                 "What's on the agenda today?"
@@ -473,7 +551,7 @@ fn ChatPage() -> impl IntoView {
                         </For>
 
                         // Thinking Indicator aligned to message structure
-                        <Show when=move || send_action.pending().get()>
+                        <Show when=move || is_streaming.get() && messages.get().last().map_or(true, |m| m.role == "user")>
                             <div class="flex w-full gap-4 justify-start">
                                 <div class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-black dark:bg-white text-white dark:text-black select-none">
                                     "A"
@@ -521,14 +599,14 @@ fn ChatPage() -> impl IntoView {
                                 prop:value=move || input_text.get()
                                 on:input=move |ev| set_input_text.set(event_target_value(&ev))
                                 on:keydown=on_keydown
-                                disabled=move || send_action.pending().get()
+                                disabled=move || is_streaming.get()
                                 placeholder="Message Antigravity..."
                                 rows="1"
                                 class="flex-1 bg-transparent resize-none outline-none text-[#0d0d0d] dark:text-[#ececec] placeholder-gray-500 dark:placeholder-gray-400 text-base py-2 px-3 overflow-y-auto max-h-48"
                             ></textarea>
                             <button
                                 on:click=on_send
-                                disabled=move || send_action.pending().get() || input_text.get().trim().is_empty()
+                                disabled=move || is_streaming.get() || input_text.get().trim().is_empty()
                                 class="flex items-center justify-center w-8 h-8 rounded-xl bg-black dark:bg-[#ececec] text-white dark:text-[#212121] disabled:opacity-20 disabled:cursor-not-allowed hover:opacity-85 active:scale-95 transition-all ml-2"
                             >
                                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
@@ -771,5 +849,61 @@ fn render_markdown(markdown: &str) -> String {
     let mut html_output = String::new();
     pulldown_cmark::html::push_html(&mut html_output, parser);
     html_output
+}
+
+/// Save a single completed turn (user message & assistant response) to KV.
+#[server(prefix = "/api")]
+pub async fn save_chat_turn(user_msg: String, assistant_msg: String) -> Result<(), ServerFnError<String>> {
+    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
+    let mut history: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages") {
+        Ok(Some(msgs)) => msgs,
+        _ => Vec::new(),
+    };
+
+    let next_id = history.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    history.push(ChatMessage {
+        id: next_id,
+        role: "user".to_string(),
+        content: user_msg,
+        timestamp: now.saturating_sub(1),
+    });
+
+    history.push(ChatMessage {
+        id: next_id + 1,
+        role: "assistant".to_string(),
+        content: assistant_msg,
+        timestamp: now,
+    });
+
+    store
+        .set_json("chat_messages", &history)
+        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+
+    Ok(())
+}
+
+#[cfg(feature = "hydrate")]
+fn get_agent_server_url() -> String {
+    use wasm_bindgen::JsCast;
+    if let Some(win) = web_sys::window() {
+        if let Some(doc) = win.document() {
+            if let Ok(Some(meta)) = doc.query_selector("meta[name='agent-server-url']") {
+                if let Ok(meta_el) = meta.dyn_into::<web_sys::HtmlMetaElement>() {
+                    return meta_el.content();
+                }
+            }
+        }
+    }
+    "http://127.0.0.1:8080".to_string()
+}
+
+#[cfg(feature = "hydrate")]
+fn get_agent_server_url_encoded(val: &str) -> String {
+    js_sys::encode_uri_component(val).as_string().unwrap_or_default()
 }
 

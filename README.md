@@ -52,7 +52,7 @@ cargo run --example hello_world
 
 The `Agent` struct manages the full lifecycle — binary discovery, tool wiring, hook registration, and policy defaults.
 
-```rust
+```rust,no_run
 use antigravity_sdk_rust::agent::Agent;
 
 #[tokio::main]
@@ -78,7 +78,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 For full control over the connection lifecycle, use `Conversation` with a `ConnectionStrategy` directly. `Conversation` is a stateful session that accumulates step history:
 
-```rust
+```rust,no_run
 use antigravity_sdk_rust::agent::AgentConfig;
 use antigravity_sdk_rust::connection::AnyConnection;
 use antigravity_sdk_rust::conversation::Conversation;
@@ -119,7 +119,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 Register Rust functions as custom tools:
 
-```rust
+```rust,no_run
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::tools::Tool;
 use serde_json::Value;
@@ -158,7 +158,7 @@ impl Tool for WeatherTool {
 
 Control agent behavior with a declarative policy system:
 
-```rust
+```rust,no_run
 use antigravity_sdk_rust::policy::{self, Policy};
 
 let policies = vec![
