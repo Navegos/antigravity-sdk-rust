@@ -5,7 +5,7 @@ use leptos_meta::*;
 use leptos_router::*;
 use leptos::either::Either;
 
-use crate::types::ChatMessage;
+use crate::types::{ChatMessage, ClientToolCall};
 
 #[cfg(feature = "ssr")]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -21,7 +21,6 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="preconnect" href="https://fonts.googleapis.com" />
                 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="true" />
                 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
                 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
                 <script type="module" inner_html="import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs'; window.mermaid = mermaid; mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });" />
                 <AutoReload options=options.clone() />
@@ -61,6 +60,81 @@ pub fn App() -> impl IntoView {
     }
 }
 
+/// Renders the collapsible thinking/reasoning process of the assistant.
+#[component]
+fn MessageThinking(
+    thinking: Option<String>,
+    #[prop(default = false)]
+    is_streaming: bool,
+) -> impl IntoView {
+    let Some(text) = thinking else {
+        return ().into_any();
+    };
+    if text.trim().is_empty() {
+        return ().into_any();
+    }
+
+    view! {
+        <details 
+            class="thinking-details mb-3 border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden transition-all duration-300"
+            open=is_streaming
+        >
+            <summary class="flex items-center justify-between px-3 py-2 cursor-pointer font-medium text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-[#1a1a1a] hover:bg-gray-100 dark:hover:bg-[#252525] transition-colors select-none">
+                <div class="flex items-center gap-2">
+                    <span class=format!("thinking-icon text-sm {}", if is_streaming { "animate-pulse" } else { "" })>
+                        "🧠"
+                    </span>
+                    <span>"Thinking Process"</span>
+                </div>
+                <span class="text-[10px] text-gray-400 dark:text-gray-500">
+                    {if is_streaming { "active" } else { "expanded" }}
+                </span>
+            </summary>
+            <div class="p-3 bg-gray-50/30 dark:bg-[#151515]/20 text-xs text-gray-600 dark:text-gray-400 font-mono whitespace-pre-wrap border-t border-gray-100 dark:border-gray-900 leading-relaxed max-h-[250px] overflow-y-auto">
+                {text}
+            </div>
+        </details>
+    }.into_any()
+}
+
+/// Renders active/completed tool calls as colored chips.
+#[component]
+fn MessageToolCalls(
+    tool_calls: Option<Vec<ClientToolCall>>,
+    #[prop(default = false)]
+    is_streaming: bool,
+) -> impl IntoView {
+    let Some(calls) = tool_calls else {
+        return ().into_any();
+    };
+    if calls.is_empty() {
+        return ().into_any();
+    }
+
+    view! {
+        <div class="tool-calls-container flex flex-wrap gap-2 mb-3">
+            {calls.into_iter().map(|call| {
+                let name = call.name.clone();
+                let args = call.args.clone();
+                let truncated_args = if args.len() > 60 {
+                    format!("{}...", &args[0..60])
+                } else {
+                    args.clone()
+                };
+                view! {
+                    <div class="flex items-center gap-1.5 px-3 py-1 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300 border border-emerald-100 dark:border-emerald-900/40 rounded-full text-xs font-medium max-w-full">
+                        <span class=format!("w-1.5 h-1.5 rounded-full bg-emerald-500 {}", if is_streaming { "animate-ping" } else { "" })></span>
+                        <span class="font-semibold">{name}</span>
+                        <span class="text-[10px] font-mono opacity-80 overflow-hidden text-ellipsis whitespace-nowrap max-w-[200px]" title=args.clone()>
+                            {truncated_args}
+                        </span>
+                    </div>
+                }
+            }).collect::<Vec<_>>()}
+        </div>
+    }.into_any()
+}
+
 /// Chat page component
 #[component]
 fn ChatPage() -> impl IntoView {
@@ -83,6 +157,8 @@ fn ChatPage() -> impl IntoView {
     // Content of the currently-streaming assistant reply.
     // Kept OUTSIDE the messages Vec so Leptos <For> doesn't miss updates.
     let (streaming_content, set_streaming_content) = signal(String::new());
+    let (streaming_thinking, set_streaming_thinking) = signal(String::new());
+    let (streaming_tool_calls, set_streaming_tool_calls) = signal(Vec::<ClientToolCall>::new());
 
     // Hydration-only mount effect to read theme preference
     Effect::new(move |_| {
@@ -98,20 +174,27 @@ fn ChatPage() -> impl IntoView {
         }
     });
 
-    // Auto-scroll messages container to bottom when messages or streaming content updates,
+    // Auto-scroll messages container to bottom when messages, streaming content, thinking, or tool calls update,
     // and run client-side formatting (syntax highlighting, mermaid diagram rendering).
     Effect::new(move |_| {
         let _ = messages.get();
         let _ = streaming_content.get();
+        let _ = streaming_thinking.get();
+        let _ = streaming_tool_calls.get();
         #[cfg(feature = "hydrate")]
         {
-            // Auto-scroll
-            if let Some(el) = messages_container_ref.get() {
-                request_animation_frame(move || {
-                    let scroll_height = el.scroll_height();
-                    el.set_scroll_top(scroll_height);
-                });
-            }
+            // Smooth scroll with proximity threshold (only scroll if user is already near bottom)
+            let _ = js_sys::eval(r#"
+                const container = document.getElementById('chat-messages-container');
+                if (container) {
+                    const threshold = 150;
+                    const isCloseToBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
+                    // If near bottom or this is a fresh user message, scroll smoothly
+                    if (isCloseToBottom || container.scrollTop === 0) {
+                        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+                    }
+                }
+            "#);
 
             // Client-side markdown enhancements (syntax highlighting & Mermaid diagrams)
             request_animation_frame(move || {
@@ -205,6 +288,8 @@ fn ChatPage() -> impl IntoView {
             role: "user".to_string(),
             content: trimmed.clone(),
             timestamp: 0, // Will be set server-side
+            thinking: None,
+            tool_calls: None,
         };
         set_messages.update(|msgs| msgs.push(user_msg));
 
@@ -224,8 +309,10 @@ fn ChatPage() -> impl IntoView {
         // Clear any previous error
         set_error_text.set(None);
 
-        // Reset streaming content for the new turn
+        // Reset streaming content and detailed state for the new turn
         set_streaming_content.set(String::new());
+        set_streaming_thinking.set(String::new());
+        set_streaming_tool_calls.set(Vec::new());
 
         // Set streaming state
         set_is_streaming.set(true);
@@ -257,6 +344,38 @@ fn ChatPage() -> impl IntoView {
                         }
                     }) as Box<dyn FnMut(web_sys::Event)>);
 
+                    // Thought handler — append to the streaming thinking signal.
+                    let on_thought = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                        if let Ok(msg_event) = event.dyn_into::<MessageEvent>() {
+                            if let Some(data) = msg_event.data().as_string() {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+                                    if let Some(text) = json["text"].as_str() {
+                                        set_streaming_thinking.update(|s| s.push_str(text));
+                                    }
+                                }
+                            }
+                        }
+                    }) as Box<dyn FnMut(web_sys::Event)>);
+
+                    // Tool handler — append to the streaming tool calls list.
+                    let on_tool = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                        if let Ok(msg_event) = event.dyn_into::<MessageEvent>() {
+                            if let Some(data) = msg_event.data().as_string() {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+                                    if let Some(name) = json["name"].as_str() {
+                                        let args_str = json["args"].to_string();
+                                        set_streaming_tool_calls.update(|calls| {
+                                            calls.push(ClientToolCall {
+                                                name: name.to_string(),
+                                                args: args_str,
+                                            });
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }) as Box<dyn FnMut(web_sys::Event)>);
+
                     // Error handler
                     let es_err_clone = es.clone();
                     let on_error = Closure::wrap(Box::new(move |event: web_sys::Event| {
@@ -278,10 +397,15 @@ fn ChatPage() -> impl IntoView {
                     let on_done = Closure::wrap(Box::new(move |_event: web_sys::Event| {
                         es_done_clone.close();
 
-                        // Grab the final accumulated content
+                        // Grab the final accumulated contents
                         let final_content = streaming_content.get_untracked();
+                        let final_thinking = streaming_thinking.get_untracked();
+                        let final_tool_calls = streaming_tool_calls.get_untracked();
 
-                        // Commit the completed assistant message to the immutable messages vec
+                        let opt_thinking = if final_thinking.is_empty() { None } else { Some(final_thinking.clone()) };
+                        let opt_tool_calls = if final_tool_calls.is_empty() { None } else { Some(final_tool_calls.clone()) };
+
+                        // Commit the completed assistant message to the messages vec
                         let assistant_id = msg_id_counter.get_untracked();
                         set_msg_id_counter.set(assistant_id + 1);
                         let assistant_msg = ChatMessage {
@@ -289,27 +413,35 @@ fn ChatPage() -> impl IntoView {
                             role: "assistant".to_string(),
                             content: final_content.clone(),
                             timestamp: 0,
+                            thinking: opt_thinking.clone(),
+                            tool_calls: opt_tool_calls.clone(),
                         };
                         set_messages.update(|msgs| msgs.push(assistant_msg));
 
                         // Clear streaming state
                         set_streaming_content.set(String::new());
+                        set_streaming_thinking.set(String::new());
+                        set_streaming_tool_calls.set(Vec::new());
                         set_is_streaming.set(false);
 
                         // Persist to KV
                         let user_content = trimmed_clone.clone();
                         leptos::task::spawn_local(async move {
-                            if let Err(e) = save_chat_turn(user_content, final_content).await {
+                            if let Err(e) = save_chat_turn(user_content, final_content, opt_thinking, opt_tool_calls).await {
                                 eprintln!("Failed to persist message to KV: {:?}", e);
                             }
                         });
                     }) as Box<dyn FnMut(web_sys::Event)>);
 
                     es.add_event_listener_with_callback("token", on_token.as_ref().unchecked_ref()).unwrap();
+                    es.add_event_listener_with_callback("thought", on_thought.as_ref().unchecked_ref()).unwrap();
+                    es.add_event_listener_with_callback("tool", on_tool.as_ref().unchecked_ref()).unwrap();
                     es.add_event_listener_with_callback("error", on_error.as_ref().unchecked_ref()).unwrap();
                     es.add_event_listener_with_callback("done", on_done.as_ref().unchecked_ref()).unwrap();
 
                     on_token.forget();
+                    on_thought.forget();
+                    on_tool.forget();
                     on_error.forget();
                     on_done.forget();
                 }
@@ -584,9 +716,15 @@ fn ChatPage() -> impl IntoView {
                                                 })
                                             } else {
                                                 let html_content = render_markdown(&content);
+                                                let thinking = msg.thinking.clone();
+                                                let tool_calls = msg.tool_calls.clone();
                                                 Either::Right(view! {
-                                                    <div class="markdown-content text-[#0d0d0d] dark:text-[#ececec] leading-relaxed text-sm w-full"
-                                                         inner_html=html_content />
+                                                    <div class="w-full">
+                                                        <MessageToolCalls tool_calls=tool_calls is_streaming=false />
+                                                        <MessageThinking thinking=thinking is_streaming=false />
+                                                        <div class="markdown-content text-[#0d0d0d] dark:text-[#ececec] leading-relaxed text-sm w-full"
+                                                             inner_html=html_content />
+                                                    </div>
                                                 })
                                             }}
                                         </div>
@@ -601,15 +739,31 @@ fn ChatPage() -> impl IntoView {
                                 <div class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-black dark:bg-white text-white dark:text-black select-none">
                                     "A"
                                 </div>
-                                <div class="flex flex-col items-start max-w-[85%]">
+                                <div class="flex flex-col items-start max-w-[85%] w-full">
                                     <div class="text-[11px] text-gray-400 dark:text-gray-500 mb-1 font-medium select-none">
                                         "Agent"
                                     </div>
+                                    {move || {
+                                        let calls = streaming_tool_calls.get();
+                                        let opt_calls = if calls.is_empty() { None } else { Some(calls) };
+                                        view! {
+                                            <MessageToolCalls tool_calls=opt_calls is_streaming=true />
+                                        }
+                                    }}
+                                    {move || {
+                                        let thought = streaming_thinking.get();
+                                        let opt_thought = if thought.is_empty() { None } else { Some(thought) };
+                                        view! {
+                                            <MessageThinking thinking=opt_thought is_streaming=true />
+                                        }
+                                    }}
                                     {
                                         move || {
                                             let content = streaming_content.get();
-                                            if content.is_empty() {
-                                                // Still waiting for first token — show bounce dots
+                                            let thought = streaming_thinking.get();
+                                            let tools = streaming_tool_calls.get();
+                                            if content.is_empty() && thought.is_empty() && tools.is_empty() {
+                                                // Still waiting for first event — show bounce dots
                                                 view! {
                                                     <div class="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
                                                         <div class="flex gap-1 py-1">
@@ -619,13 +773,15 @@ fn ChatPage() -> impl IntoView {
                                                         </div>
                                                     </div>
                                                 }.into_any()
-                                            } else {
+                                            } else if !content.is_empty() {
                                                 // Tokens arriving — render markdown in real time
                                                 let html = render_markdown(&content);
                                                 view! {
                                                     <div class="markdown-content text-[#0d0d0d] dark:text-[#ececec] leading-relaxed text-sm w-full"
                                                          inner_html=html />
                                                 }.into_any()
+                                            } else {
+                                                ().into_any()
                                             }
                                         }
                                     }
@@ -863,6 +1019,8 @@ pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<
         role: "user".to_string(),
         content: message,
         timestamp: now.saturating_sub(1),
+        thinking: None,
+        tool_calls: None,
     });
 
     let assistant_msg = ChatMessage {
@@ -870,6 +1028,8 @@ pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<
         role: "assistant".to_string(),
         content: text,
         timestamp: now,
+        thinking: None,
+        tool_calls: None,
     };
 
     messages.push(assistant_msg.clone());
@@ -931,7 +1091,12 @@ fn render_markdown(markdown: &str) -> String {
 
 /// Save a single completed turn (user message & assistant response) to KV.
 #[server(prefix = "/api")]
-pub async fn save_chat_turn(user_msg: String, assistant_msg: String) -> Result<(), ServerFnError<String>> {
+pub async fn save_chat_turn(
+    user_msg: String,
+    assistant_msg: String,
+    thinking: Option<String>,
+    tool_calls: Option<Vec<ClientToolCall>>,
+) -> Result<(), ServerFnError<String>> {
     let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
     let mut history: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages") {
         Ok(Some(msgs)) => msgs,
@@ -949,6 +1114,8 @@ pub async fn save_chat_turn(user_msg: String, assistant_msg: String) -> Result<(
         role: "user".to_string(),
         content: user_msg,
         timestamp: now.saturating_sub(1),
+        thinking: None,
+        tool_calls: None,
     });
 
     history.push(ChatMessage {
@@ -956,6 +1123,8 @@ pub async fn save_chat_turn(user_msg: String, assistant_msg: String) -> Result<(
         role: "assistant".to_string(),
         content: assistant_msg,
         timestamp: now,
+        thinking,
+        tool_calls,
     });
 
     store

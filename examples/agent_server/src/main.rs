@@ -183,13 +183,6 @@ async fn main() {
                     .to_string(),
             },
         ))
-        .capabilities(antigravity_sdk_rust::types::CapabilitiesConfig {
-            enabled_tools: Some(vec![]),
-            disabled_tools: None,
-            compaction_threshold: None,
-            image_model: None,
-            finish_tool_schema_json: None,
-        })
         .build();
 
     // Start the Agent
