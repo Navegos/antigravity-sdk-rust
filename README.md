@@ -117,11 +117,27 @@ struct WeatherTool;
 
 #[async_trait]
 impl Tool for WeatherTool {
-    fn name(&self) -> String {
-        "get_weather".to_string()
+    fn name(&self) -> &str {
+        "get_weather"
     }
 
-    async fn execute(&self, args: Value) -> Result<Value, anyhow::Error> {
+    fn description(&self) -> &str {
+        "Get the current weather for a city."
+    }
+
+    fn parameters_json_schema(&self) -> &str {
+        r#"{
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string"
+                }
+            },
+            "required": ["city"]
+        }"#
+    }
+
+    async fn call(&self, args: Value) -> Result<Value, anyhow::Error> {
         let city = args.get("city").and_then(|c| c.as_str()).unwrap_or("Tokyo");
         Ok(serde_json::json!({ "weather": format!("It's sunny in {}", city) }))
     }
@@ -137,7 +153,7 @@ use antigravity_sdk_rust::policy::{self, Policy};
 
 let policies = vec![
     policy::deny_all(),                          // Block all tools by default
-    policy::allow_creates(vec!["view_file"]),    // Allow reading files
+    policy::allow("VIEW_FILE"),                  // Allow reading/viewing files
 ];
 ```
 
@@ -147,4 +163,6 @@ For more information, see [ARCHITECTURE.md](file:///Volumes/goldcoders/antigravi
 
 ## License
 
-[Apache License 2.0](LICENSE)
+This project is licensed under the [MIT License](LICENSE).
+
+
