@@ -1,0 +1,113 @@
+#[cfg(feature = "ssr")]
+#[tokio::main]
+async fn main() {
+    use antigravity_sdk_rust::agent::{Agent, AgentConfig};
+    use antigravity_sdk_rust::policy;
+    use antigravity_sdk_rust::types::GeminiConfig;
+    use axum::Router;
+    use leptos::prelude::*;
+    use leptos_axum::{generate_route_list, LeptosRoutes};
+    use leptos_axum_chat::app::{shell, App};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use tracing_subscriber::EnvFilter;
+
+    // 1. Load .env for GEMINI_API_KEY
+    dotenvy::dotenv().ok();
+
+    // 2. Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .init();
+
+    // 3. Get Leptos configuration
+    let conf = get_configuration(None).expect("Failed to get Leptos configuration");
+    let leptos_options = conf.leptos_options.clone();
+    let addr = leptos_options.site_addr;
+
+    // 4. Initialize the antigravity-sdk-rust Agent
+    let mut agent_config = AgentConfig::default();
+
+    // Configure Gemini
+    let mut gemini_config = GeminiConfig::default();
+    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
+        gemini_config.api_key = Some(api_key);
+    }
+    gemini_config.models.default.name = "gemini-3.5-flash".to_string();
+    agent_config.gemini_config = gemini_config;
+
+    // Set policies — allow all for this demo
+    agent_config.policies = Some(vec![policy::allow_all()]);
+
+    // Set custom system instructions for chat behavior
+    agent_config.system_instructions =
+        Some(antigravity_sdk_rust::types::SystemInstructions::Custom(
+            antigravity_sdk_rust::types::CustomSystemInstructions {
+                text: "You are a helpful AI assistant in a chat interface. \
+                       Keep responses concise and conversational. \
+                       Use markdown formatting when helpful."
+                    .to_string(),
+            },
+        ));
+
+    // Check for harness binary path
+    if let Ok(harness_path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
+        agent_config.binary_path = Some(harness_path);
+    }
+
+    // Disable all file/command tools — this is a chat-only example
+    agent_config.capabilities.enabled_tools = Some(vec![]);
+
+    let mut agent = Agent::new(agent_config);
+    tracing::info!("Starting antigravity-sdk-rust Agent...");
+    agent
+        .start()
+        .await
+        .expect("Failed to start Agent. Is localharness installed?");
+    tracing::info!("Agent started successfully");
+
+    // Wrap agent in shared state
+    let agent_state: leptos_axum_chat::AgentState = Arc::new(Mutex::new(agent));
+
+    // Also keep chat history in memory for this session
+    let chat_history: leptos_axum_chat::ChatHistoryState =
+        Arc::new(Mutex::new(Vec::new()));
+
+    // 5. Build routes
+    let routes = generate_route_list(App);
+
+    // 6. Build Axum router
+    let app = Router::new()
+        .leptos_routes_with_context(
+            &leptos_options,
+            routes,
+            {
+                let agent_state = agent_state.clone();
+                let chat_history = chat_history.clone();
+                move || {
+                    leptos::context::provide_context(agent_state.clone());
+                    leptos::context::provide_context(chat_history.clone());
+                }
+            },
+            {
+                let leptos_options = leptos_options.clone();
+                move || shell(leptos_options.clone())
+            },
+        )
+        .fallback(leptos_axum::file_and_error_handler(shell))
+        .with_state(leptos_options);
+
+    // 7. Serve
+    tracing::info!("Listening on http://{}", &addr);
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("Failed to bind");
+    axum::serve(listener, app.into_make_service())
+        .await
+        .expect("Server error");
+}
+
+#[cfg(not(feature = "ssr"))]
+pub fn main() {
+    // no-op: client-side only
+}

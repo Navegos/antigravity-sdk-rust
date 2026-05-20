@@ -1,0 +1,65 @@
+[package]
+name = "leptos_axum_chat"
+version = "0.1.0"
+edition = "2021"
+authors = ["codeitlikemiley <codeitlikemiley@gmail.com>"]
+description = "Antigravity SDK Chat Interface — Leptos + Native Axum Example"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+leptos = { version = "0.8" }
+leptos_meta = { version = "0.8" }
+leptos_router = { version = "0.8" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+console_error_panic_hook = "0.1"
+
+# SSR-only dependencies
+leptos_axum = { version = "0.8", optional = true }
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+antigravity-sdk-rust = { path = "../..", optional = true }
+dotenvy = { version = "0.15", optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["fs"], optional = true }
+http = { version = "1", optional = true }
+
+# Hydrate-only dependencies
+wasm-bindgen = { version = "=0.2.103", optional = true }
+
+[workspace]
+
+[features]
+hydrate = ["leptos/hydrate", "dep:wasm-bindgen"]
+ssr = [
+  "leptos/ssr",
+  "leptos_meta/ssr",
+  "leptos_router/ssr",
+  "dep:leptos_axum",
+  "dep:axum",
+  "dep:tokio",
+  "dep:antigravity-sdk-rust",
+  "dep:dotenvy",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+  "dep:tower",
+  "dep:tower-http",
+  "dep:http",
+]
+
+[package.metadata.leptos]
+output-name = "leptos_axum_chat"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+tailwind-input-file = "input.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
