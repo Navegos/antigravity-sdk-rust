@@ -178,7 +178,7 @@ cargo leptos serve
 
 ### Leptos + Spin/WASI (Edge)
 
-For edge/serverless deployments on [Fermyon Spin](https://www.fermyon.com/spin). Since Spin components cannot make outbound TCP/WebSocket connections directly, this target runs in **Sidecar Mode**, where the component communicates via HTTP with a native runner process (`agent_server`):
+For edge/serverless deployments on [Spin](https://github.com/spinframework/spin) (formerly Fermyon Spin, now under Akamai). Since Spin components cannot make outbound TCP/WebSocket connections directly, this target runs in **Sidecar Mode**, where the component communicates via HTTP with a native runner process (`agent_server`):
 
 ```sh
 # Terminal 1: Start the agent sidecar

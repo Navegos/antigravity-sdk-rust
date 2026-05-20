@@ -22,7 +22,7 @@ The SDK provides two web integration patterns depending on your deployment targe
 | Example | Runtime | SDK Integration | Use Case |
 |---------|---------|-----------------|----------|
 | [`leptos_axum`](#2-leptos--axum-native) | Native (Tokio) | Full Agent SDK | Standard web servers (VPS, Docker, bare metal) |
-| [`leptos_ssr_axum`](#3-leptos--spin-wasi) + [`agent_server`](#4-agent-server-sidecar) | Spin/WASI | Full Agent SDK (via sidecar) | Edge/serverless (Fermyon Cloud, SpinKube) |
+| [`leptos_ssr_axum`](#3-leptos--spin-wasi) + [`agent_server`](#4-agent-server-sidecar) | Spin/WASI | Full Agent SDK (via sidecar) | Edge/serverless (Akamai, SpinKube) |
 
 ---
 
@@ -59,7 +59,7 @@ Browser → Axum Server (native)
 
 **Path:** `leptos_ssr_axum/`
 
-A chat application that runs as a [Spin](https://www.fermyon.com/spin) WebAssembly component. Since Spin components cannot make outbound TCP/WebSocket connections (only `wasi:http`), this example runs in **Sidecar Mode** using the [`agent_server`](#4-agent-server-sidecar) sidecar to get full SDK features (harness, tools, hooks, and policies).
+A chat application that runs as a [Spin](https://github.com/spinframework/spin) WebAssembly component (integrating Leptos with Spin via [leptos-spin](https://github.com/akamai-developers/leptos-spin)). Since Spin components cannot make outbound TCP/WebSocket connections (only `wasi:http`), this example runs in **Sidecar Mode** using the [`agent_server`](#4-agent-server-sidecar) sidecar to get full SDK features (harness, tools, hooks, and policies).
 
 ```sh
 # Terminal 1: Start the sidecar (runs full SDK + localharness)

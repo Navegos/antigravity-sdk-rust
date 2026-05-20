@@ -182,7 +182,7 @@ fn ChatPage() -> impl IntoView {
                         </h2>
                         <p class="text-[#6b7d95] text-sm max-w-md">
                             "Ask me anything. I'm an AI agent powered by the Antigravity SDK, "
-                            "running server-side as a WASI component on Fermyon Spin."
+                            "running server-side as a WASI component on Spin."
                         </p>
                     </div>
                 </Show>
