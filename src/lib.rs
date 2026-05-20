@@ -68,7 +68,25 @@ pub mod conversation;
 pub mod hooks;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod local;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
 pub mod policy;
 pub mod tools;
 pub mod triggers;
 pub mod types;
+
+/// Helper to spawn asynchronous tasks in a target-agnostic manner.
+pub fn spawn_task<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tokio::spawn(future);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        any_spawner::Executor::spawn_local(future);
+    }
+}

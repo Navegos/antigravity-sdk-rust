@@ -127,7 +127,7 @@ impl Agent {
     /// Registers a custom lifecycle hook. Hooks can observe or modify agent transitions.
     pub fn register_hook(&self, hook: Arc<dyn Hook>) {
         let hr = self.hook_runner.clone();
-        tokio::spawn(async move {
+        crate::spawn_task(async move {
             hr.register(hook).await;
         });
     }
@@ -150,7 +150,7 @@ impl Agent {
     /// Registers a custom tool available for execution by the agent.
     pub fn register_tool(&self, tool: Arc<dyn Tool>) {
         let tr = self.tool_runner.clone();
-        tokio::spawn(async move {
+        crate::spawn_task(async move {
             tr.register(tool).await;
         });
     }
@@ -275,9 +275,35 @@ impl Agent {
         // 6. Build and connect strategy
         #[cfg(target_arch = "wasm32")]
         {
-            return Err(anyhow!(
-                "Default LocalConnection is not supported on WebAssembly. Implement and use a custom connection strategy."
-            ));
+            let mut cap = self.config.capabilities.clone();
+            if let Some(ref schema) = self.config.response_schema {
+                cap.finish_tool_schema_json = Some(schema.clone());
+            }
+
+            let strategy = crate::wasm::WasmConnectionStrategy {
+                gemini_config: self.config.gemini_config.clone(),
+                capabilities_config: cap,
+                system_instructions: self.config.system_instructions.clone(),
+                save_dir: self.config.save_dir.clone(),
+                workspaces: self.config.workspaces.clone().unwrap_or_default(),
+                skills_paths: self.config.skills_paths.clone(),
+                tool_runner: Some(self.tool_runner.clone()),
+                hook_runner: Some(self.hook_runner.clone()),
+                conversation_id: self.config.conversation_id.clone().unwrap_or_default(),
+            };
+
+            let conn = strategy.connect().await?;
+            let conversation = Arc::new(Conversation::new(Arc::new(conn), None));
+            self.conversation = Some(conversation.clone());
+
+            // 7. Start triggers
+            if !self.config.triggers.is_empty() {
+                let runner = TriggerRunner::new(self.config.triggers.clone());
+                runner.start(&conversation.connection());
+                self.trigger_runner = Some(runner);
+            }
+
+            Ok(())
         }
 
         #[cfg(not(target_arch = "wasm32"))]

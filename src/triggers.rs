@@ -46,7 +46,7 @@ impl TriggerRunner {
         for trigger in &self.triggers {
             let conn = connection.clone();
             let tr = trigger.clone();
-            tokio::spawn(async move {
+            crate::spawn_task(async move {
                 if let Err(e) = tr.run(conn).await {
                     tracing::error!("Trigger execution failed: {:?}", e);
                 }
