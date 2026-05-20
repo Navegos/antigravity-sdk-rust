@@ -76,6 +76,9 @@ fn ChatPage() -> impl IntoView {
     // Monotonic counter for unique message IDs (avoids <For> key collisions).
     let (msg_id_counter, set_msg_id_counter) = signal(0u64);
     let (is_streaming, set_is_streaming) = signal(false);
+    // Content of the currently-streaming assistant reply.
+    // Kept OUTSIDE the messages Vec so Leptos <For> doesn't miss updates.
+    let (streaming_content, set_streaming_content) = signal(String::new());
 
     // Hydration-only mount effect to read theme preference
     Effect::new(move |_| {
@@ -110,6 +113,7 @@ fn ChatPage() -> impl IntoView {
         set_msg_id_counter.set(0);
         set_error_text.set(None);
         set_is_streaming.set(false);
+        set_streaming_content.set(String::new());
     };
 
     // Load existing messages from KV store on mount.
@@ -167,10 +171,20 @@ fn ChatPage() -> impl IntoView {
         set_input_text.set(String::new());
         if let Some(el) = textarea_ref.get() {
             el.set_value("");
+            #[cfg(feature = "hydrate")]
+            {
+                use wasm_bindgen::JsCast;
+                if let Some(html_el) = el.dyn_ref::<web_sys::HtmlElement>() {
+                    let _ = web_sys::HtmlElement::style(html_el).set_property("height", "auto");
+                }
+            }
         }
 
         // Clear any previous error
         set_error_text.set(None);
+
+        // Reset streaming content for the new turn
+        set_streaming_content.set(String::new());
 
         // Set streaming state
         set_is_streaming.set(true);
@@ -187,33 +201,15 @@ fn ChatPage() -> impl IntoView {
 
             match EventSource::new(&url) {
                 Ok(es) => {
-                    // Create an empty assistant message in messages
-                    let assistant_id = msg_id_counter.get_untracked();
-                    set_msg_id_counter.set(assistant_id + 1);
-
-                    let assistant_msg = ChatMessage {
-                        id: assistant_id,
-                        role: "assistant".to_string(),
-                        content: String::new(),
-                        timestamp: 0,
-                    };
-                    set_messages.update(|msgs| msgs.push(assistant_msg));
-
                     let trimmed_clone = trimmed.clone();
 
-                    // Token handler
+                    // Token handler — append to the dedicated streaming signal.
                     let on_token = Closure::wrap(Box::new(move |event: web_sys::Event| {
                         if let Ok(msg_event) = event.dyn_into::<MessageEvent>() {
                             if let Some(data) = msg_event.data().as_string() {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
                                     if let Some(text) = json["text"].as_str() {
-                                        set_messages.update(|msgs| {
-                                            if let Some(last) = msgs.last_mut() {
-                                                if last.role == "assistant" {
-                                                    last.content.push_str(text);
-                                                }
-                                            }
-                                        });
+                                        set_streaming_content.update(|s| s.push_str(text));
                                     }
                                 }
                             }
@@ -236,22 +232,30 @@ fn ChatPage() -> impl IntoView {
                         }
                     }) as Box<dyn FnMut(web_sys::Event)>);
 
-                    // Done handler
+                    // Done handler — commit streaming content to the messages vec.
                     let es_done_clone = es.clone();
                     let on_done = Closure::wrap(Box::new(move |_event: web_sys::Event| {
                         es_done_clone.close();
+
+                        // Grab the final accumulated content
+                        let final_content = streaming_content.get_untracked();
+
+                        // Commit the completed assistant message to the immutable messages vec
+                        let assistant_id = msg_id_counter.get_untracked();
+                        set_msg_id_counter.set(assistant_id + 1);
+                        let assistant_msg = ChatMessage {
+                            id: assistant_id,
+                            role: "assistant".to_string(),
+                            content: final_content.clone(),
+                            timestamp: 0,
+                        };
+                        set_messages.update(|msgs| msgs.push(assistant_msg));
+
+                        // Clear streaming state
+                        set_streaming_content.set(String::new());
                         set_is_streaming.set(false);
 
-                        // Grab the accumulated content of the assistant message
-                        let mut final_content = String::new();
-                        let msgs = messages.get_untracked();
-                        if let Some(last) = msgs.last() {
-                            if last.role == "assistant" {
-                                final_content = last.content.clone();
-                            }
-                        }
-
-                        // Call the server function to persist history to KV
+                        // Persist to KV
                         let user_content = trimmed_clone.clone();
                         leptos::task::spawn_local(async move {
                             if let Err(e) = save_chat_turn(user_content, final_content).await {
@@ -550,8 +554,8 @@ fn ChatPage() -> impl IntoView {
                             }
                         </For>
 
-                        // Thinking Indicator aligned to message structure
-                        <Show when=move || is_streaming.get() && messages.get().last().map_or(true, |m| m.role == "user")>
+                        // Live streaming reply — displayed OUTSIDE <For> so reactive updates work.
+                        <Show when=move || is_streaming.get()>
                             <div class="flex w-full gap-4 justify-start">
                                 <div class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold bg-black dark:bg-white text-white dark:text-black select-none">
                                     "A"
@@ -560,13 +564,30 @@ fn ChatPage() -> impl IntoView {
                                     <div class="text-[11px] text-gray-400 dark:text-gray-500 mb-1 font-medium select-none">
                                         "Agent"
                                     </div>
-                                    <div class="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
-                                        <div class="flex gap-1 py-1">
-                                            <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 0ms"></div>
-                                            <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 150ms"></div>
-                                            <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 300ms"></div>
-                                        </div>
-                                    </div>
+                                    {
+                                        move || {
+                                            let content = streaming_content.get();
+                                            if content.is_empty() {
+                                                // Still waiting for first token — show bounce dots
+                                                view! {
+                                                    <div class="text-sm text-gray-500 dark:text-gray-400 flex items-center gap-2">
+                                                        <div class="flex gap-1 py-1">
+                                                            <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 0ms"></div>
+                                                            <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 150ms"></div>
+                                                            <div class="w-1.5 h-1.5 bg-[#10a37f] rounded-full animate-bounce" style="animation-delay: 300ms"></div>
+                                                        </div>
+                                                    </div>
+                                                }.into_any()
+                                            } else {
+                                                // Tokens arriving — render markdown in real time
+                                                let html = render_markdown(&content);
+                                                view! {
+                                                    <div class="markdown-content text-[#0d0d0d] dark:text-[#ececec] leading-relaxed text-sm w-full"
+                                                         inner_html=html />
+                                                }.into_any()
+                                            }
+                                        }
+                                    }
                                 </div>
                             </div>
                         </Show>
@@ -593,11 +614,26 @@ fn ChatPage() -> impl IntoView {
                 // Bottom Input Area (centered max-w-3xl)
                 <div class="border-t border-[#e5e5e7] dark:border-[#2f2f2f] bg-white dark:bg-[#212121] py-4">
                     <div class="max-w-3xl mx-auto w-full px-4">
-                        <div class="relative flex items-center bg-[#f4f4f4] dark:bg-[#2f2f2f] rounded-2xl p-1.5 border border-transparent focus-within:border-gray-300 dark:focus-within:border-gray-700 transition-colors">
+                        <div class="relative flex items-end bg-[#f4f4f4] dark:bg-[#2f2f2f] rounded-3xl p-2 border border-transparent focus-within:border-gray-300 dark:focus-within:border-gray-700 transition-colors">
                             <textarea
                                 node_ref=textarea_ref
                                 prop:value=move || input_text.get()
-                                on:input=move |ev| set_input_text.set(event_target_value(&ev))
+                                on:input=move |ev| {
+                                    set_input_text.set(event_target_value(&ev));
+                                    #[cfg(feature = "hydrate")]
+                                    {
+                                        use wasm_bindgen::JsCast;
+                                        if let Some(target) = ev.target() {
+                                            if let Ok(el) = target.dyn_into::<web_sys::HtmlTextAreaElement>() {
+                                                if let Some(html_el) = el.dyn_ref::<web_sys::HtmlElement>() {
+                                                    let _ = web_sys::HtmlElement::style(html_el).set_property("height", "auto");
+                                                    let scroll_height = el.scroll_height();
+                                                    let _ = web_sys::HtmlElement::style(html_el).set_property("height", &format!("{scroll_height}px"));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 on:keydown=on_keydown
                                 disabled=move || is_streaming.get()
                                 placeholder="Message Antigravity..."
@@ -607,10 +643,11 @@ fn ChatPage() -> impl IntoView {
                             <button
                                 on:click=on_send
                                 disabled=move || is_streaming.get() || input_text.get().trim().is_empty()
-                                class="flex items-center justify-center w-8 h-8 rounded-xl bg-black dark:bg-[#ececec] text-white dark:text-[#212121] disabled:opacity-20 disabled:cursor-not-allowed hover:opacity-85 active:scale-95 transition-all ml-2"
+                                class="flex items-center justify-center w-8 h-8 rounded-full bg-black dark:bg-[#ececec] text-white dark:text-[#212121] disabled:opacity-20 disabled:cursor-not-allowed hover:opacity-85 active:scale-95 transition-all ml-2 mb-1"
                             >
-                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
-                                    <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.53 60.53 0 0 0 18.425-7.706a.75.75 0 0 0 0-1.238L3.478 2.404Z" />
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4">
+                                    <line x1="12" y1="19" x2="12" y2="5"></line>
+                                    <polyline points="5 12 12 5 19 12"></polyline>
                                 </svg>
                             </button>
                         </div>
