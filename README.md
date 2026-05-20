@@ -80,6 +80,7 @@ For full control over the connection lifecycle, use `Conversation` with a `Conne
 
 ```rust
 use antigravity_sdk_rust::agent::AgentConfig;
+use antigravity_sdk_rust::connection::AnyConnection;
 use antigravity_sdk_rust::conversation::Conversation;
 use antigravity_sdk_rust::local::LocalConnectionStrategy;
 use antigravity_sdk_rust::tools::ToolRunner;
@@ -103,7 +104,7 @@ async fn main() -> Result<(), anyhow::Error> {
     );
 
     let connection = strategy.connect().await?;
-    let conversation = Conversation::new(Arc::new(connection), None);
+    let conversation = Conversation::new(AnyConnection::Local(Arc::new(connection)), None);
 
     let response = conversation.chat_to_completion("What files are here?").await?;
     println!("Agent: {}", response.text);
