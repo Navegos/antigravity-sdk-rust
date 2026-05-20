@@ -3,7 +3,7 @@
 //! This module provides the [`Conversation`] struct, which coordinates an active session's
 //! event stream, aggregates history steps, tracks token usage metadata, and filters thinking/text deltas.
 
-use crate::connection::Connection;
+use crate::connection::{AnyConnection, Connection};
 use crate::types::{
     ChatResponse, Step, StepSource, StepTarget, StepType, StreamChunk, UsageMetadata,
 };
@@ -35,7 +35,7 @@ pub struct ConversationState {
 /// `Conversation` consumes step events from an underlying [`Connection`], updates the cumulative history,
 /// tracks token usage, and provides high-level APIs to chat, stream structured events, and wait for run completions.
 pub struct Conversation {
-    conn: Arc<dyn Connection>,
+    conn: AnyConnection,
     max_history_size: usize,
     state: Arc<Mutex<ConversationState>>,
 }
@@ -54,7 +54,7 @@ impl Conversation {
     ///
     /// Optionally restricts the memory storage to `max_history_size` steps (default is 10,000 steps).
     /// If `max_history_size` is set to `0`, state trimming is disabled.
-    pub fn new(conn: Arc<dyn Connection>, max_history_size: Option<usize>) -> Self {
+    pub fn new(conn: AnyConnection, max_history_size: Option<usize>) -> Self {
         Self {
             conn,
             max_history_size: max_history_size.unwrap_or(DEFAULT_MAX_HISTORY_SIZE),
@@ -69,7 +69,7 @@ impl Conversation {
     }
 
     /// Returns the underlying [`Connection`].
-    pub fn connection(&self) -> Arc<dyn Connection> {
+    pub fn connection(&self) -> AnyConnection {
         self.conn.clone()
     }
 
@@ -336,93 +336,22 @@ mod tests {
         clippy::manual_string_new
     )]
     use super::*;
-    use crate::types::{QuestionHookResult, StepSource, StepTarget, StepType, ToolCall};
-    use async_trait::async_trait;
+    use crate::connection::{AnyConnection, MockConnection};
+    use crate::types::{StepSource, StepTarget, StepType, ToolCall};
     use futures_util::StreamExt;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
-    struct MockConnection {
-        id: String,
-        is_idle: AtomicBool,
-        steps_to_yield: Mutex<Vec<Step>>,
-        sent_prompts: Mutex<Vec<String>>,
-    }
-
-    impl MockConnection {
-        fn new(id: &str) -> Self {
-            Self {
-                id: id.to_string(),
-                is_idle: AtomicBool::new(true),
-                steps_to_yield: Mutex::new(Vec::new()),
-                sent_prompts: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Connection for MockConnection {
-        fn conversation_id(&self) -> &str {
-            &self.id
-        }
-
-        fn is_idle(&self) -> bool {
-            self.is_idle.load(Ordering::SeqCst)
-        }
-
-        fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
-            let steps = self.steps_to_yield.lock().unwrap().clone();
-            futures_util::stream::iter(steps).map(Ok).boxed()
-        }
-
-        async fn send(&self, content: &str) -> Result<(), anyhow::Error> {
-            self.sent_prompts.lock().unwrap().push(content.to_string());
-            Ok(())
-        }
-
-        async fn send_trigger_notification(&self, _content: &str) -> Result<(), anyhow::Error> {
-            Ok(())
-        }
-
-        async fn send_halt_request(&self) -> Result<(), anyhow::Error> {
-            Ok(())
-        }
-
-        async fn send_tool_confirmation(
-            &self,
-            _trajectory_id: &str,
-            _step_index: u32,
-            _accepted: bool,
-        ) -> Result<(), anyhow::Error> {
-            Ok(())
-        }
-
-        async fn send_tool_response(
-            &self,
-            _id: &str,
-            _result: crate::types::ToolResult,
-        ) -> Result<(), anyhow::Error> {
-            Ok(())
-        }
-
-        async fn send_question_response(
-            &self,
-            _trajectory_id: &str,
-            _step_index: u32,
-            _answers: QuestionHookResult,
-        ) -> Result<(), anyhow::Error> {
-            Ok(())
-        }
-
-        async fn disconnect(&self) -> Result<(), anyhow::Error> {
-            Ok(())
-        }
+    fn test_setup(
+        id: &str,
+        max_history_size: Option<usize>,
+    ) -> (Arc<MockConnection>, Conversation) {
+        let mock = Arc::new(MockConnection::new(id));
+        let conv = Conversation::new(AnyConnection::Mock(mock.clone()), max_history_size);
+        (mock, conv)
     }
 
     #[tokio::test]
     async fn test_conversation_initialization() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
-        let conv = Conversation::new(conn, Some(10));
+        let (_conn, conv) = test_setup("conv-123", Some(10));
         assert_eq!(conv.conversation_id(), "conv-123");
         assert!(conv.is_idle());
         assert_eq!(conv.history().await.len(), 0);
@@ -431,8 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_records_turn_boundary() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
-        let conv = Conversation::new(conn, Some(10));
+        let (_conn, conv) = test_setup("conv-123", Some(10));
         conv.send("hello").await.unwrap();
         assert_eq!(conv.turn_count().await, 1);
         conv.send("world").await.unwrap();
@@ -441,7 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_receive_steps_accumulates_history() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
+        let (conn, conv) = test_setup("conv-123", Some(10));
         let step1 = Step {
             id: "1".to_string(),
             step_index: 1,
@@ -454,7 +382,6 @@ mod tests {
         };
         conn.steps_to_yield.lock().unwrap().push(step1);
 
-        let conv = Conversation::new(conn, Some(10));
         let mut steps = conv.receive_steps();
         while let Some(res) = steps.next().await {
             res.unwrap();
@@ -468,7 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compaction_indices_tracked() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
+        let (conn, conv) = test_setup("conv-123", Some(10));
         let step1 = Step {
             id: "1".to_string(),
             step_index: 1,
@@ -479,7 +406,6 @@ mod tests {
         };
         conn.steps_to_yield.lock().unwrap().push(step1);
 
-        let conv = Conversation::new(conn, Some(10));
         let mut steps = conv.receive_steps();
         while let Some(res) = steps.next().await {
             res.unwrap();
@@ -490,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_size_trimming() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
+        let (conn, conv) = test_setup("conv-123", Some(3));
         for i in 0..5 {
             conn.steps_to_yield.lock().unwrap().push(Step {
                 id: i.to_string(),
@@ -500,7 +426,6 @@ mod tests {
             });
         }
 
-        let conv = Conversation::new(conn.clone(), Some(3));
         let mut steps = conv.receive_steps();
         while let Some(res) = steps.next().await {
             res.unwrap();
@@ -514,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_max_history_size_zero_disables_trimming() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
+        let (conn, conv) = test_setup("conv-123", Some(0));
         for i in 0..5 {
             conn.steps_to_yield.lock().unwrap().push(Step {
                 id: i.to_string(),
@@ -524,7 +449,6 @@ mod tests {
             });
         }
 
-        let conv = Conversation::new(conn.clone(), Some(0));
         let mut steps = conv.receive_steps();
         while let Some(res) = steps.next().await {
             res.unwrap();
@@ -536,7 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_receive_chunks_routing() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
+        let (conn, conv) = test_setup("conv-123", Some(10));
         let step = Step {
             id: "1".to_string(),
             step_index: 1,
@@ -549,7 +473,6 @@ mod tests {
         };
         conn.steps_to_yield.lock().unwrap().push(step);
 
-        let conv = Conversation::new(conn, Some(10));
         let mut chunks = conv.receive_chunks();
         let mut text = String::new();
         let mut thought = String::new();
@@ -567,7 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_receive_chunks_environmental_filtering() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
+        let (conn, conv) = test_setup("conv-123", Some(10));
         let step = Step {
             id: "1".to_string(),
             step_index: 1,
@@ -579,7 +502,6 @@ mod tests {
         };
         conn.steps_to_yield.lock().unwrap().push(step);
 
-        let conv = Conversation::new(conn, Some(10));
         let mut chunks = conv.receive_chunks();
         let mut text = String::new();
         while let Some(res) = chunks.next().await {
@@ -594,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_receive_chunks_tool_calls_deduplication() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
+        let (conn, conv) = test_setup("conv-123", Some(10));
         let tc = ToolCall {
             id: "call_a".to_string(),
             name: "tool_1".to_string(),
@@ -612,7 +534,6 @@ mod tests {
         };
         conn.steps_to_yield.lock().unwrap().push(step);
 
-        let conv = Conversation::new(conn, Some(10));
         let mut chunks = conv.receive_chunks();
         let mut tool_calls = Vec::new();
         while let Some(res) = chunks.next().await {
@@ -627,7 +548,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_receive_chunks_empty_tool_id_no_dedup() {
-        let conn = Arc::new(MockConnection::new("conv-123"));
+        let (conn, conv) = test_setup("conv-123", Some(10));
         let tc = ToolCall {
             id: "".to_string(),
             name: "tool_1".to_string(),
@@ -645,7 +566,6 @@ mod tests {
         };
         conn.steps_to_yield.lock().unwrap().push(step);
 
-        let conv = Conversation::new(conn, Some(10));
         let mut chunks = conv.receive_chunks();
         let mut tool_calls = Vec::new();
         while let Some(res) = chunks.next().await {

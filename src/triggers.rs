@@ -4,27 +4,46 @@
 //! (e.g. status polling, cron intervals, external notification listeners) to interact with the
 //! connection session asynchronously. Background orchestration of these tasks is handled via [`TriggerRunner`].
 
-use async_trait::async_trait;
+use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
 /// A trait for defining asynchronous background tasks that execute during a connection lifecycle.
-#[async_trait]
 pub trait Trigger: Send + Sync {
-    /// Launches the trigger task, passing the active [`Connection`](crate::connection::Connection) instance.
+    /// Launches the trigger task, passing the active [`AnyConnection`](crate::connection::AnyConnection) instance.
     ///
     /// # Errors
     ///
     /// Returns an error if the background execution encounters a fatal issue.
-    async fn run(
+    fn run(
         &self,
-        connection: Arc<dyn crate::connection::Connection>,
-    ) -> Result<(), anyhow::Error>;
+        connection: crate::connection::AnyConnection,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send;
+}
+
+/// Object-safe version of the [`Trigger`] trait, automatically implemented via a blanket impl.
+///
+/// This trait is used internally by the SDK to allow dynamic dispatch and storage of triggers.
+pub trait DynTrigger: Send + Sync {
+    /// Launches the trigger task.
+    fn run(
+        &self,
+        connection: crate::connection::AnyConnection,
+    ) -> BoxFuture<'_, Result<(), anyhow::Error>>;
+}
+
+impl<T: Trigger + ?Sized> DynTrigger for T {
+    fn run(
+        &self,
+        connection: crate::connection::AnyConnection,
+    ) -> BoxFuture<'_, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.run(connection).await })
+    }
 }
 
 /// Orchestrator for launching background [`Trigger`] loops.
 pub struct TriggerRunner {
     /// Registered trigger instances.
-    pub triggers: Vec<Arc<dyn Trigger>>,
+    pub triggers: Vec<Arc<dyn DynTrigger>>,
 }
 
 impl std::fmt::Debug for TriggerRunner {
@@ -37,12 +56,12 @@ impl std::fmt::Debug for TriggerRunner {
 
 impl TriggerRunner {
     /// Creates a new `TriggerRunner` initialized with the given list of triggers.
-    pub fn new(triggers: Vec<Arc<dyn Trigger>>) -> Self {
+    pub fn new(triggers: Vec<Arc<dyn DynTrigger>>) -> Self {
         Self { triggers }
     }
 
     /// Spawns each registered trigger inside a new asynchronous tokio task block.
-    pub fn start(&self, connection: &Arc<dyn crate::connection::Connection>) {
+    pub fn start(&self, connection: &crate::connection::AnyConnection) {
         for trigger in &self.triggers {
             let conn = connection.clone();
             let tr = trigger.clone();

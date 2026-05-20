@@ -114,12 +114,10 @@ Register Rust functions as custom tools:
 ```rust
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::tools::Tool;
-use async_trait::async_trait;
 use serde_json::Value;
 
 struct WeatherTool;
 
-#[async_trait]
 impl Tool for WeatherTool {
     fn name(&self) -> &str {
         "get_weather"
@@ -141,9 +139,11 @@ impl Tool for WeatherTool {
         }"#
     }
 
-    async fn call(&self, args: Value) -> Result<Value, anyhow::Error> {
-        let city = args.get("city").and_then(|c| c.as_str()).unwrap_or("Tokyo");
-        Ok(serde_json::json!({ "weather": format!("It's sunny in {}", city) }))
+    fn call(&self, args: Value) -> impl std::future::Future<Output = Result<Value, anyhow::Error>> + Send {
+        async move {
+            let city = args.get("city").and_then(|c| c.as_str()).unwrap_or("Tokyo");
+            Ok(serde_json::json!({ "weather": format!("It's sunny in {}", city) }))
+        }
     }
 }
 ```
@@ -192,6 +192,39 @@ spin build --up
 ```
 
 > See [`examples/README.md`](examples/README.md) for detailed architecture diagrams and configuration options.
+
+## WebAssembly (WASM) & Edge Compilation
+
+The SDK supports compiling directly to the `wasm32-wasip1` WebAssembly target. This enables running agents inside sandboxed Wasm runtimes (such as Spin, Wasmtime, or Wasmer) that support WASI network sockets.
+
+### Wasm Connection Architecture
+
+In standard native environments, the SDK spawns the `localharness` binary as a local subprocess. Since process spawning is not supported inside WebAssembly sandboxes, when targeting WASM, the SDK switches to **Direct Network Connection Mode** via `WasmConnectionStrategy` and `WasmConnection`:
+
+1. **Host Server**: A host-side `localharness` WebSocket server is run on the machine/VM (configured via `ANTIGRAVITY_HARNESS_HOST` and `ANTIGRAVITY_HARNESS_PORT`).
+2. **WebSocket Handshake**: The `WasmConnectionStrategy` opens a TCP socket to the harness server, initiates a WebSocket client handshake with the Gemini API key passed via the `x-goog-api-key` header, and upgrades it to a bi-directional stream.
+3. **Session Handshake**: The client sends an `InitializeConversationEvent` containing the `HarnessConfig` (tools, workspaces, and system instructions) to start the stateful agent trajectory.
+4. **Asynchronous Event Loop**: Two asynchronous tasks are spawned under the WASM event loop:
+   - **Reader Loop**: Continuously reads WebSocket frames, parses incoming `OutputEvent` messages (including `StepUpdate` and `TrajectoryStateUpdate`), maps them to SDK `Step` types, dispatches lifecycle hooks, and routes tool calls.
+   - **Sender Loop**: Buffers and sends outgoing `InputEvent` messages (user messages, tool responses, question replies, etc.) back to the harness.
+
+### Running the WASM Mock Test Suite
+
+The mock and unit test suite in `src/wasm.rs` validates WASM-specific functionality (connection lifecycle, event loops, tool call/result extraction, and idle state transitions). Since it uses a standard WebSocket framework, you can run the suite natively on your host machine without a full WebAssembly runner:
+
+```sh
+# Run all unit tests including the WASM mock connection tests
+cargo test wasm::tests
+```
+
+This mock test suite programmatically binds a local WebSocket server to a dynamically allocated free port, completes the initialization handshake, feeds mock trajectory state updates/step updates, and asserts that `WasmConnection` correctly receives messages, invokes callback hooks, and cleanly terminates the stream upon transitioning to the idle state.
+
+### Rust 2024 and Native Async Traits
+
+The SDK has been fully refactored to use native async traits (stable since Rust 1.75 / Rust 2024), completely removing the dependency on the `#[async_trait]` macro.
+
+- **Native Async Traits**: Custom implementations of `Connection`, `Hook`, `Tool`, and `Trigger` now use standard async function definitions returning `impl Future<Output = ...> + Send` where necessary to maintain compile-time thread safety bounds.
+- **Dynamic Dispatch via Blanket Impls**: Because native async traits are not directly object-safe (`dyn Trait` compatible) without manual workarounds, the SDK defines companion traits `DynConnection`, `DynHook`, `DynTool`, and `DynTrigger` which are object-safe and automatically implemented via blanket implementations for any type implementing the base trait. This allows clean, zero-overhead dynamic dispatch (e.g. `Arc<dyn DynHook>`).
 
 ## Local Development
 

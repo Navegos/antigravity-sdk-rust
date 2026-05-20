@@ -1,10 +1,10 @@
 use crate::conversation::Conversation;
-use crate::hooks::{Hook, HookRunner};
+use crate::hooks::{DynHook, HookRunner};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::local::LocalConnectionStrategy;
 use crate::policy::{self, Policy, PolicyEnforcer};
-use crate::tools::{Tool, ToolRunner};
-use crate::triggers::{Trigger, TriggerRunner};
+use crate::tools::{DynTool, ToolRunner};
+use crate::triggers::{DynTrigger, TriggerRunner};
 use crate::types::{
     BuiltinTools, CapabilitiesConfig, ChatResponse, GeminiConfig, SystemInstructions,
 };
@@ -32,11 +32,11 @@ pub struct AgentConfig {
     /// Set of safety policies (e.g., workspace lock, run command approvals) to restrict tool execution.
     pub policies: Option<Vec<Policy>>,
     /// Handlers triggered during agent lifecycle hooks (pre/post tool calls, start session, etc.).
-    pub hooks: Vec<Arc<dyn Hook>>,
+    pub hooks: Vec<Arc<dyn DynHook>>,
     /// Custom triggers spawned when the agent starts.
-    pub triggers: Vec<Arc<dyn Trigger>>,
+    pub triggers: Vec<Arc<dyn DynTrigger>>,
     /// Custom Rust tools registered to be available for invocation.
-    pub tools: Vec<Arc<dyn Tool>>,
+    pub tools: Vec<Arc<dyn DynTool>>,
     /// Specific conversation ID to assign or resume.
     pub conversation_id: Option<String>,
     /// Path to the application data directory where cache/configs are stored.
@@ -125,7 +125,7 @@ impl Agent {
     }
 
     /// Registers a custom lifecycle hook. Hooks can observe or modify agent transitions.
-    pub fn register_hook(&self, hook: Arc<dyn Hook>) {
+    pub fn register_hook(&self, hook: Arc<dyn DynHook>) {
         let hr = self.hook_runner.clone();
         crate::spawn_task(async move {
             hr.register(hook).await;
@@ -137,7 +137,7 @@ impl Agent {
     /// # Errors
     ///
     /// Returns an error if the agent session has already been started.
-    pub fn register_trigger(&mut self, trigger: Arc<dyn Trigger>) -> Result<(), anyhow::Error> {
+    pub fn register_trigger(&mut self, trigger: Arc<dyn DynTrigger>) -> Result<(), anyhow::Error> {
         if self.conversation.is_some() {
             return Err(anyhow!(
                 "Cannot register triggers after the agent has started."
@@ -148,7 +148,7 @@ impl Agent {
     }
 
     /// Registers a custom tool available for execution by the agent.
-    pub fn register_tool(&self, tool: Arc<dyn Tool>) {
+    pub fn register_tool(&self, tool: Arc<dyn DynTool>) {
         let tr = self.tool_runner.clone();
         crate::spawn_task(async move {
             tr.register(tool).await;
@@ -293,7 +293,10 @@ impl Agent {
             };
 
             let conn = strategy.connect().await?;
-            let conversation = Arc::new(Conversation::new(Arc::new(conn), None));
+            let conversation = Arc::new(Conversation::new(
+                crate::connection::AnyConnection::Wasm(Arc::new(conn)),
+                None,
+            ));
             self.conversation = Some(conversation.clone());
 
             // 7. Start triggers
@@ -327,7 +330,10 @@ impl Agent {
             );
 
             let conn = strategy.connect().await?;
-            let conversation = Arc::new(Conversation::new(Arc::new(conn), None));
+            let conversation = Arc::new(Conversation::new(
+                crate::connection::AnyConnection::Local(Arc::new(conn)),
+                None,
+            ));
             self.conversation = Some(conversation.clone());
 
             // 7. Start triggers

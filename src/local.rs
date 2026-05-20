@@ -25,7 +25,6 @@ use crate::types::{
 };
 
 use anyhow::anyhow;
-use async_trait::async_trait;
 use futures_util::stream::{self, BoxStream};
 use futures_util::{SinkExt, StreamExt};
 use prost::Message;
@@ -77,7 +76,6 @@ impl std::fmt::Debug for LocalConnection {
     }
 }
 
-#[async_trait]
 impl Connection for LocalConnection {
     fn conversation_id(&self) -> &str {
         if self.conversation_id.is_empty() {
@@ -94,10 +92,22 @@ impl Connection for LocalConnection {
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
         let step_rx = self.step_rx.clone();
         let is_idle = self.is_idle.clone();
-        stream::unfold((), move |()| {
+        stream::unfold(false, move |mut checked_initial_idle| {
             let step_rx = step_rx.clone();
             let is_idle = is_idle.clone();
             async move {
+                // If the connection is already idle on the first poll and the queue is empty, terminate.
+                if !checked_initial_idle {
+                    checked_initial_idle = true;
+                    let mut guard = step_rx.lock().await;
+                    if guard
+                        .as_mut()
+                        .is_some_and(|rx| rx.is_empty() && is_idle.load(Ordering::SeqCst))
+                    {
+                        return None;
+                    }
+                }
+
                 loop {
                     let mut guard = step_rx.lock().await;
                     let Some(rx) = &mut *guard else {
@@ -111,13 +121,10 @@ impl Connection for LocalConnection {
                                 }
                             }
                             _ => {
-                                return Some((step_res, ()));
+                                return Some((step_res, checked_initial_idle));
                             }
                         },
                         Err(mpsc::error::TryRecvError::Empty) => {
-                            if is_idle.load(Ordering::SeqCst) {
-                                return None;
-                            }
                             drop(guard);
                             let mut guard2 = step_rx.lock().await;
                             let Some(rx2) = &mut *guard2 else {
@@ -133,7 +140,7 @@ impl Connection for LocalConnection {
                                         }
                                     }
                                     _ => {
-                                        return Some((res, ()));
+                                        return Some((res, checked_initial_idle));
                                     }
                                 },
                                 None => return None,
@@ -158,6 +165,12 @@ impl Connection for LocalConnection {
         {
             let mut active = self.active_subagent_ids.lock().await;
             active.clear();
+        }
+        {
+            let mut guard = self.step_rx.lock().await;
+            if let Some(rx) = &mut *guard {
+                while rx.try_recv().is_ok() {}
+            }
         }
 
         let input_event = InputEvent {

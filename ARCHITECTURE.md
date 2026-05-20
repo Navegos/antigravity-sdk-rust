@@ -88,18 +88,35 @@ sequenceDiagram
 
 ### Connection Lifecycle (WebAssembly Network Target)
 
-For WebAssembly targets (`wasm32-wasip1`), the SDK connects to a running host-side harness over the network rather than spawning a subprocess:
+For WebAssembly targets (`wasm32-wasip1`), the SDK cannot spawn a subprocess since WASM runtimes lack process control. Instead, it connects to a running host-side `localharness` process over a network WebSocket connection via `WasmConnectionStrategy` and `WasmConnection`.
 
 ```mermaid
 sequenceDiagram
     participant SDK as WASM Rust SDK
     participant Host as Host Machine (localharness)
 
-    SDK->>Host: Open TCP Connection & Upgrade to WebSocket (with API Key)
-    Host->>SDK: Handshake Completed
-    SDK->>Host: Send InitializeConversationEvent (HarnessConfig)
-    Note over SDK,Host: Step execution loop active
+    SDK->>Host: Open TCP Connection (Host:Port)
+    SDK->>Host: WebSocket Client Handshake (Sec-WebSocket-Version: 13, x-goog-api-key)
+    Host->>SDK: Handshake Upgrade Response (101 Switching Protocols)
+    SDK->>Host: Send InitializeConversationEvent (HarnessConfig via WebSocket JSON)
+    
+    par Async Event Loop Reader Task
+        Host-->>SDK: Stream StepUpdate & TrajectoryStateUpdate events
+        Note over SDK: Map to Step, dispatch hooks, execute local tools
+    and Async Event Loop Sender Task
+        SDK-->>Host: Send InputEvent (UserInput, ToolResponse, etc.)
+    end
+
+    Note over SDK,Host: TrajectoryStateUpdate (STATE_IDLE) sent by Host
+    Note over SDK: Reader detects IDLE, pushes IDLE_SENTINEL, closes stream
 ```
+
+The lifecycle details:
+1. **TCP Connection**: The SDK establishes a standard TCP stream to the host running the harness (configured via environment variables `ANTIGRAVITY_HARNESS_HOST` and `ANTIGRAVITY_HARNESS_PORT`).
+2. **WebSocket Upgrade & Authentication**: It performs a client upgrade handshake with the harness using the `x-goog-api-key` header to authenticate.
+3. **Stream Non-blocking Upgrade**: The TCP stream is transitioned to non-blocking mode to support cooperative asynchronous scheduling.
+4. **Harness Initialization**: An `InitializeConversationEvent` is sent over the WebSocket containing the full `HarnessConfig` protobuf serialized as JSON. This registers active capabilities, workspaces, custom tools, and system instructions.
+5. **Event Loops & Sentinel Termination**: The connection spawns a Reader task and a Sender task. The event loops stream step updates. Once a `TrajectoryStateUpdate` with `STATE_IDLE` is received, the connection knows the execution trajectory is complete. It pushes an `IDLE_SENTINEL` step to the receiver channel, which signals the consumer stream to yield `None` and terminate cleanly.
 
 ---
 
@@ -107,3 +124,34 @@ sequenceDiagram
 
 - **Lock Scoping**: Mutexes (`tokio::sync::Mutex`) are carefully scoped to minimize contention. Mutex guards are explicitly dropped before any `.await` points to avoid deadlocks.
 - **Hook Dispatch**: Hook guards are cloned and dropped prior to executing hooks asynchronously, ensuring the agent's internal state remains responsive.
+
+### Thread Safety and Event Loop under WASM
+
+Standard native runtimes run on multi-threaded thread pools. In contrast, WASM runtimes (like `wasm32-wasip1`) operate on a single-threaded execution model. To ensure robustness and prevent deadlocks/starvation:
+- **Non-Blocking IO**: The underlying socket in `WasmConnection` is set to non-blocking.
+- **Cooperative Yielding**: The WS Sender task utilizes `try_lock()` on the shared socket mutex. If the socket is locked by the reader or another operation, the sender cooperatively sleeps with an exponential backoff (`5ms` doubling up to `50ms`), yielding the thread back to the runtime executor to prevent starving other tasks on the single thread.
+- **Task Spawning**: The SDK uses a unified `spawn_task` abstraction that adapts to target runtimes, ensuring background futures run concurrently.
+
+---
+
+## Object Safety (dyn Compatibility) and Native Async Traits in Rust 2024
+
+The SDK has been fully refactored to leverage native async traits (stable since Rust 1.75 / Rust 2024), completely removing the dependency on the `#[async_trait]` macro.
+
+- **Native Async Traits**: Traits like `Connection`, `Hook`, `Tool`, and `Trigger` are implemented as native async traits using standard `async fn` syntax or returning `impl Future + Send` to ensure compiler-enforced thread safety boundaries.
+- **Companion Trait Pattern for Dynamic Dispatch**: Native async traits are not directly object-safe (`dyn Trait` compatible) because they return anonymous concrete futures. To support dynamic dispatch, the SDK defines companion traits `DynConnection`, `DynHook`, `DynTool`, and `DynTrigger` which are object-safe and return boxed futures (`BoxFuture`).
+- **Zero-overhead Blanket Implementations**: The companion traits are automatically implemented via blanket implementations for any type implementing the base trait:
+  ```rust
+  pub trait DynHook: Send + Sync {
+      fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
+      // ...
+  }
+
+  impl<T: Hook + ?Sized> DynHook for T {
+      fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>> {
+          Box::pin(async move { self.on_session_start().await })
+      }
+      // ...
+  }
+  ```
+  This provides the best of both worlds: clean, idiomatic implementation of async traits for developers using standard Rust 2024 features, while preserving the internal ability to handle collections of dynamic trait objects (e.g. `Arc<dyn DynHook>` in `HookRunner`, `Box<dyn DynTool>` in `ToolRunner`, `AnyConnection` enum dispatch, etc.).

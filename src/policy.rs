@@ -6,7 +6,6 @@
 
 use crate::hooks::Hook;
 use crate::types::{HookResult, ToolCall};
-use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -263,7 +262,6 @@ impl std::fmt::Debug for PolicyEnforcer {
     }
 }
 
-#[async_trait]
 impl Hook for PolicyEnforcer {
     async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
         for bucket in &self.buckets {

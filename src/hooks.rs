@@ -4,66 +4,157 @@
 //! to intercept session startup, pre/post tool invocations, execution errors, and user interactions.
 
 use crate::types::{AskQuestionEntry, HookResult, QuestionHookResult, ToolCall, ToolResult};
-use async_trait::async_trait;
+use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
 /// Trait representing an active interceptor of agent lifecycle events.
 ///
 /// Implementors can register hooks via [`Agent::register_hook`](crate::agent::Agent::register_hook)
 /// to audit tool invocations, log events, or restrict actions dynamically.
-#[async_trait]
 pub trait Hook: Send + Sync {
     /// Triggered when the agent establishes a connection and starts a session.
-    async fn on_session_start(&self) -> Result<(), anyhow::Error> {
-        Ok(())
+    fn on_session_start(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async { Ok(()) }
     }
     /// Intercepts the start of a user turn before the LLM processes the prompt.
     /// Returns `allow: false` to halt execution.
-    async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
-        Ok(HookResult {
-            allow: true,
-            message: String::new(),
-        })
+    fn pre_turn(
+        &self,
+    ) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
+        async {
+            Ok(HookResult {
+                allow: true,
+                message: String::new(),
+            })
+        }
     }
     /// Intercepts a tool call immediately before it is executed by the runner.
     /// Returns `allow: false` to prevent execution.
-    async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
-        Ok(HookResult {
-            allow: true,
-            message: String::new(),
-        })
+    fn pre_tool_call<'a>(
+        &'a self,
+        _tool_call: &'a ToolCall,
+    ) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
+        async {
+            Ok(HookResult {
+                allow: true,
+                message: String::new(),
+            })
+        }
     }
     /// Triggered after a tool successfully returns a result.
-    async fn post_tool_call(&self, _result: &ToolResult) -> Result<(), anyhow::Error> {
-        Ok(())
+    fn post_tool_call<'a>(
+        &'a self,
+        _result: &'a ToolResult,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async { Ok(()) }
     }
     /// Triggered when a tool execution encounters an error.
     /// Allows fallback logic or customized error payloads.
-    async fn on_tool_error(
-        &self,
-        error: &anyhow::Error,
-    ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
-        Ok((
-            HookResult {
-                allow: false,
-                message: error.to_string(),
-            },
-            None,
-        ))
+    fn on_tool_error<'a>(
+        &'a self,
+        error: &'a anyhow::Error,
+    ) -> impl std::future::Future<
+        Output = Result<(HookResult, Option<serde_json::Value>), anyhow::Error>,
+    > + Send {
+        async move {
+            Ok((
+                HookResult {
+                    allow: false,
+                    message: error.to_string(),
+                },
+                None,
+            ))
+        }
     }
     /// Intercepts a prompt to ask the user clarifying questions.
-    async fn on_interaction(
-        &self,
-        _questions: &[AskQuestionEntry],
-    ) -> Result<Option<QuestionHookResult>, anyhow::Error> {
-        Ok(None)
+    fn on_interaction<'a>(
+        &'a self,
+        _questions: &'a [AskQuestionEntry],
+    ) -> impl std::future::Future<Output = Result<Option<QuestionHookResult>, anyhow::Error>> + Send
+    {
+        async { Ok(None) }
+    }
+}
+
+/// Object-safe version of the [`Hook`] trait, automatically implemented via a blanket impl.
+///
+/// This trait is used internally by the SDK to allow dynamic dispatch and storage of hooks.
+pub trait DynHook: Send + Sync {
+    /// Triggered when the agent establishes a connection and starts a session.
+    fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>>;
+
+    /// Intercepts the start of a user turn before the LLM processes the prompt.
+    fn pre_turn(&self) -> BoxFuture<'_, Result<HookResult, anyhow::Error>>;
+
+    /// Intercepts a tool call immediately before it is executed by the runner.
+    fn pre_tool_call<'a>(
+        &'a self,
+        tool_call: &'a ToolCall,
+    ) -> BoxFuture<'a, Result<HookResult, anyhow::Error>>;
+
+    /// Triggered after a tool successfully returns a result.
+    fn post_tool_call<'a>(
+        &'a self,
+        result: &'a ToolResult,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>>;
+
+    /// Triggered when a tool execution encounters an error.
+    fn on_tool_error<'a>(
+        &'a self,
+        error: &'a anyhow::Error,
+    ) -> BoxFuture<'a, Result<(HookResult, Option<serde_json::Value>), anyhow::Error>>;
+
+    /// Intercepts a prompt to ask the user clarifying questions.
+    fn on_interaction<'a>(
+        &'a self,
+        questions: &'a [AskQuestionEntry],
+    ) -> BoxFuture<'a, Result<Option<QuestionHookResult>, anyhow::Error>>;
+}
+
+impl<T: Hook + ?Sized> DynHook for T {
+    fn on_session_start(&self) -> BoxFuture<'_, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.on_session_start().await })
+    }
+
+    fn pre_turn(&self) -> BoxFuture<'_, Result<HookResult, anyhow::Error>> {
+        Box::pin(async move { self.pre_turn().await })
+    }
+
+    fn pre_tool_call<'a>(
+        &'a self,
+        tool_call: &'a ToolCall,
+    ) -> BoxFuture<'a, Result<HookResult, anyhow::Error>> {
+        Box::pin(async move { self.pre_tool_call(tool_call).await })
+    }
+
+    fn post_tool_call<'a>(
+        &'a self,
+        result: &'a ToolResult,
+    ) -> BoxFuture<'a, Result<(), anyhow::Error>> {
+        Box::pin(async move { self.post_tool_call(result).await })
+    }
+
+    fn on_tool_error<'a>(
+        &'a self,
+        error: &'a anyhow::Error,
+    ) -> BoxFuture<'a, Result<(HookResult, Option<serde_json::Value>), anyhow::Error>> {
+        Box::pin(async move { self.on_tool_error(error).await })
+    }
+
+    fn on_interaction<'a>(
+        &'a self,
+        questions: &'a [AskQuestionEntry],
+    ) -> BoxFuture<'a, Result<Option<QuestionHookResult>, anyhow::Error>> {
+        Box::pin(async move { self.on_interaction(questions).await })
     }
 }
 
 /// Internal helper that manages a collection of registered [`Hook`]s and dispatches events sequentially.
 #[derive(Clone, Default)]
 pub struct HookRunner {
-    hooks: Arc<tokio::sync::RwLock<Vec<Arc<dyn Hook>>>>,
+    hooks: Arc<tokio::sync::RwLock<Vec<Arc<dyn DynHook>>>>,
 }
 
 impl std::fmt::Debug for HookRunner {
@@ -82,7 +173,7 @@ impl HookRunner {
         }
     }
 
-    pub async fn register(&self, hook: Arc<dyn Hook>) {
+    pub async fn register(&self, hook: Arc<dyn DynHook>) {
         self.hooks.write().await.push(hook);
     }
 
@@ -184,7 +275,6 @@ mod tests {
         calls: Arc<Mutex<Vec<String>>>,
     }
 
-    #[async_trait]
     impl Hook for TrackerHook {
         async fn on_session_start(&self) -> Result<(), anyhow::Error> {
             self.calls

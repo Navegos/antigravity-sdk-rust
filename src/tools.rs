@@ -4,13 +4,12 @@
 //! API requests) to be registered with the agent and executed when requested by the model.
 //! Registration and concurrent execution is managed via [`ToolRunner`].
 
-use async_trait::async_trait;
+use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A trait defining custom tool behaviors that can be invoked by the model.
-#[async_trait]
 pub trait Tool: Send + Sync {
     /// Returns the unique name of the tool, matching what the model will call.
     fn name(&self) -> &str;
@@ -26,14 +25,52 @@ pub trait Tool: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if argument validation or tool execution fails.
-    async fn call(&self, args: Value) -> Result<Value, anyhow::Error>;
+    fn call(
+        &self,
+        args: Value,
+    ) -> impl std::future::Future<Output = Result<Value, anyhow::Error>> + Send;
+}
+
+/// Object-safe version of the [`Tool`] trait, automatically implemented via a blanket impl.
+///
+/// This trait is used internally by the SDK to allow dynamic dispatch and storage of tools.
+pub trait DynTool: Send + Sync {
+    /// Returns the unique name of the tool, matching what the model will call.
+    fn name(&self) -> &str;
+
+    /// Returns a description of the tool to help the model understand when to use it.
+    fn description(&self) -> &str;
+
+    /// Returns a JSON schema describing the expected parameters of the tool.
+    fn parameters_json_schema(&self) -> &str;
+
+    /// Executes the tool with the given JSON arguments.
+    fn call(&self, args: Value) -> BoxFuture<'_, Result<Value, anyhow::Error>>;
+}
+
+impl<T: Tool + ?Sized> DynTool for T {
+    fn name(&self) -> &str {
+        self.name()
+    }
+
+    fn description(&self) -> &str {
+        self.description()
+    }
+
+    fn parameters_json_schema(&self) -> &str {
+        self.parameters_json_schema()
+    }
+
+    fn call(&self, args: Value) -> BoxFuture<'_, Result<Value, anyhow::Error>> {
+        Box::pin(async move { self.call(args).await })
+    }
 }
 
 /// Registry and concurrent runner for custom tool implementations.
 #[derive(Clone, Default)]
 pub struct ToolRunner {
     /// Active tools registered with the runner.
-    pub tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    pub tools: Arc<tokio::sync::RwLock<HashMap<String, Arc<dyn DynTool>>>>,
 }
 
 impl std::fmt::Debug for ToolRunner {
@@ -53,7 +90,7 @@ impl ToolRunner {
     }
 
     /// Registers a custom tool implementation.
-    pub async fn register(&self, tool: Arc<dyn Tool>) {
+    pub async fn register(&self, tool: Arc<dyn DynTool>) {
         self.tools
             .write()
             .await

@@ -24,3 +24,4 @@ db.json
 *.rs.bak
 cargo-timing.html
 /bin/
+/.agents/

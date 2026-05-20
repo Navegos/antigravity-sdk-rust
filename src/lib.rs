@@ -68,7 +68,7 @@ pub mod conversation;
 pub mod hooks;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod local;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 pub mod wasm;
 
 pub mod policy;

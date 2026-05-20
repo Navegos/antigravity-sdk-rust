@@ -13,6 +13,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, mpsc};
 use tracing;
 
+#[cfg(not(target_arch = "wasm32"))]
+use tokio_tungstenite::tungstenite;
+#[cfg(target_arch = "wasm32")]
+use tungstenite;
+
 use tungstenite::{Message as WsMessage, client::client, handshake::client::Request};
 
 use crate::connection::Connection;
@@ -36,7 +41,7 @@ use crate::types::{
 };
 
 /// Internal state tracker for matching `StepUpdate` payloads with active handshakes.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StepTracker {
     state: i32,
     handled_requests: HashSet<String>,
@@ -44,13 +49,10 @@ pub struct StepTracker {
 
 impl StepTracker {
     pub fn new() -> Self {
-        Self {
-            state: 0,
-            handled_requests: HashSet::new(),
-        }
+        Self::default()
     }
 
-    pub fn update_state(&mut self, state: i32) {
+    pub const fn update_state(&mut self, state: i32) {
         self.state = state;
     }
 
@@ -62,6 +64,9 @@ impl StepTracker {
         false
     }
 }
+
+#[cfg(test)]
+pub static TEST_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 
 /// A WASM connection strategy that establishes a connection to a remote localharness
 /// instance running on the host machine.
@@ -79,6 +84,11 @@ pub struct WasmConnectionStrategy {
 }
 
 impl WasmConnectionStrategy {
+    #[allow(
+        clippy::too_many_lines,
+        clippy::significant_drop_tightening,
+        clippy::option_if_let_else
+    )]
     pub async fn connect(&self) -> Result<WasmConnection, anyhow::Error> {
         let api_key = self
             .gemini_config
@@ -97,13 +107,30 @@ impl WasmConnectionStrategy {
 
         let host =
             std::env::var("ANTIGRAVITY_HARNESS_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-        let port = std::env::var("ANTIGRAVITY_HARNESS_PORT").unwrap_or_else(|_| "8000".to_string());
+        #[allow(unused_mut)]
+        let mut port =
+            std::env::var("ANTIGRAVITY_HARNESS_PORT").unwrap_or_else(|_| "8000".to_string());
+        #[cfg(test)]
+        {
+            let test_port = TEST_PORT.load(std::sync::atomic::Ordering::SeqCst);
+            if test_port != 0 {
+                port = test_port.to_string();
+            }
+        }
 
         let ws_url = format!("ws://{host}:{port}/");
         tracing::info!("Connecting to localharness WebSocket at {}", ws_url);
 
         let req = Request::builder()
             .uri(&ws_url)
+            .header("Host", format!("{host}:{port}"))
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
             .header("x-goog-api-key", &api_key)
             .body(())?;
 
@@ -286,7 +313,7 @@ impl WasmConnectionStrategy {
         };
         let init_json = serde_json::to_string(&init_event)?;
         ws.write(WsMessage::Text(init_json))?;
-        let _ = ws.flush()?;
+        ws.flush()?;
 
         let socket = Arc::new(Mutex::new(ws));
 
@@ -304,11 +331,10 @@ impl WasmConnectionStrategy {
                             let _ = ws_lock.flush();
                         }
                         break;
-                    } else {
-                        tokio::time::sleep(delay).await;
-                        if delay < std::time::Duration::from_millis(50) {
-                            delay *= 2;
-                        }
+                    }
+                    tokio::time::sleep(delay).await;
+                    if delay < std::time::Duration::from_millis(50) {
+                        delay *= 2;
                     }
                 }
             }
@@ -804,6 +830,7 @@ impl WasmConnectionStrategy {
 }
 
 /// Stateful WebSocket harness connection for WebAssembly.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct WasmConnection {
     conversation_id: String,
@@ -818,7 +845,6 @@ pub struct WasmConnection {
     step_trackers: Arc<Mutex<HashMap<(String, u32), StepTracker>>>,
 }
 
-#[async_trait::async_trait]
 impl Connection for WasmConnection {
     fn conversation_id(&self) -> &str {
         if self.conversation_id.is_empty() {
@@ -835,10 +861,22 @@ impl Connection for WasmConnection {
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
         let step_rx = self.step_rx.clone();
         let is_idle = self.is_idle.clone();
-        stream::unfold((), move |()| {
+        stream::unfold(false, move |mut checked_initial_idle| {
             let step_rx = step_rx.clone();
             let is_idle = is_idle.clone();
             async move {
+                // If the connection is already idle on the first poll and the queue is empty, terminate.
+                if !checked_initial_idle {
+                    checked_initial_idle = true;
+                    let mut guard = step_rx.lock().await;
+                    if guard
+                        .as_mut()
+                        .is_some_and(|rx| rx.is_empty() && is_idle.load(Ordering::SeqCst))
+                    {
+                        return None;
+                    }
+                }
+
                 loop {
                     let mut guard = step_rx.lock().await;
                     let Some(rx) = &mut *guard else {
@@ -852,13 +890,10 @@ impl Connection for WasmConnection {
                                 }
                             }
                             _ => {
-                                return Some((step_res, ()));
+                                return Some((step_res, checked_initial_idle));
                             }
                         },
                         Err(mpsc::error::TryRecvError::Empty) => {
-                            if is_idle.load(Ordering::SeqCst) {
-                                return None;
-                            }
                             drop(guard);
                             let mut guard2 = step_rx.lock().await;
                             let Some(rx2) = &mut *guard2 else {
@@ -874,7 +909,7 @@ impl Connection for WasmConnection {
                                         }
                                     }
                                     _ => {
-                                        return Some((res, ()));
+                                        return Some((res, checked_initial_idle));
                                     }
                                 },
                                 None => return None,
@@ -899,6 +934,12 @@ impl Connection for WasmConnection {
         {
             let mut active = self.active_subagent_ids.lock().await;
             active.clear();
+        }
+        {
+            let mut guard = self.step_rx.lock().await;
+            if let Some(rx) = &mut *guard {
+                while rx.try_recv().is_ok() {}
+            }
         }
 
         let input_event = InputEvent {
@@ -1119,4 +1160,292 @@ fn extract_tool_result(step_update: &StepUpdate) -> Option<ToolResult> {
         result,
         error,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::field_reassign_with_default)]
+mod tests {
+    use super::*;
+    use crate::proto::localharness::{
+        ActionCreateFile, ActionEditFile, ActionFindFile, ActionRunCommand, ActionViewFile,
+        StepUpdate,
+    };
+    use crate::types::{CapabilitiesConfig, GeminiConfig};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    #[test]
+    fn test_step_tracker_new() {
+        let mut tracker = StepTracker::new();
+        assert!(!tracker.mark_handled("questions_request"));
+    }
+
+    #[test]
+    fn test_step_tracker_update_state() {
+        let mut tracker = StepTracker::new();
+        tracker.update_state(3);
+        assert!(tracker.mark_handled("questions_request"));
+        assert!(!tracker.mark_handled("questions_request"));
+        assert!(tracker.mark_handled("tool_confirmation_request"));
+
+        tracker.update_state(1);
+        assert!(!tracker.mark_handled("another_request"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_extract_builtin_tool_call_all_types() {
+        // 1. FindFile
+        let step_update_find = StepUpdate {
+            trajectory_id: Some("traj_1".to_string()),
+            step_index: Some(1),
+            find_file: Some(ActionFindFile {
+                directory_path: Some("dir_path".to_string()),
+                query: Some("query_str".to_string()),
+                output: None,
+            }),
+            ..Default::default()
+        };
+        let tc = extract_builtin_tool_call(&step_update_find).unwrap();
+        assert_eq!(tc.id, "traj_1_1");
+        assert_eq!(tc.name, "FIND_FILE");
+        assert_eq!(tc.canonical_path, Some("dir_path".to_string()));
+        assert_eq!(
+            tc.args,
+            serde_json::json!({
+                "directory_path": "dir_path",
+                "query": "query_str"
+            })
+        );
+
+        // Test extract_tool_result for FindFile
+        let step_update_find_res = StepUpdate {
+            trajectory_id: Some("traj_1".to_string()),
+            step_index: Some(1),
+            find_file: Some(ActionFindFile {
+                directory_path: Some("dir_path".to_string()),
+                query: Some("query_str".to_string()),
+                output: None,
+            }),
+            text: Some("result_text".to_string()),
+            error_message: Some("error_text".to_string()),
+            ..Default::default()
+        };
+        let tr = extract_tool_result(&step_update_find_res).unwrap();
+        assert_eq!(tr.id, Some("traj_1_1".to_string()));
+        assert_eq!(tr.name, "FIND_FILE");
+        assert_eq!(
+            tr.result,
+            Some(serde_json::Value::String("result_text".to_string()))
+        );
+        assert_eq!(tr.error, Some("error_text".to_string()));
+
+        // 2. RunCommand
+        let step_update_run = StepUpdate {
+            trajectory_id: Some("traj_1".to_string()),
+            step_index: Some(2),
+            run_command: Some(ActionRunCommand {
+                command_line: Some("echo hello".to_string()),
+                working_dir: Some("work_dir".to_string()),
+                exit_code: None,
+                combined_output: None,
+            }),
+            ..Default::default()
+        };
+        let tc = extract_builtin_tool_call(&step_update_run).unwrap();
+        assert_eq!(tc.id, "traj_1_2");
+        assert_eq!(tc.name, "RUN_COMMAND");
+        assert_eq!(tc.canonical_path, None);
+        assert_eq!(
+            tc.args,
+            serde_json::json!({
+                "command_line": "echo hello",
+                "working_dir": "work_dir"
+            })
+        );
+
+        // 3. ViewFile
+        let step_update_view = StepUpdate {
+            trajectory_id: Some("traj_1".to_string()),
+            step_index: Some(3),
+            view_file: Some(ActionViewFile {
+                file_path: Some("view_path".to_string()),
+                start_line: Some(10),
+                end_line: Some(20),
+            }),
+            ..Default::default()
+        };
+        let tc = extract_builtin_tool_call(&step_update_view).unwrap();
+        assert_eq!(tc.id, "traj_1_3");
+        assert_eq!(tc.name, "VIEW_FILE");
+        assert_eq!(tc.canonical_path, Some("view_path".to_string()));
+        assert_eq!(
+            tc.args,
+            serde_json::json!({
+                "file_path": "view_path",
+                "start_line": 10,
+                "end_line": 20
+            })
+        );
+
+        // 4. CreateFile
+        let step_update_create = StepUpdate {
+            trajectory_id: Some("traj_1".to_string()),
+            step_index: Some(4),
+            create_file: Some(ActionCreateFile {
+                file_path: Some("create_path".to_string()),
+                contents: Some("create_contents".to_string()),
+            }),
+            ..Default::default()
+        };
+        let tc = extract_builtin_tool_call(&step_update_create).unwrap();
+        assert_eq!(tc.id, "traj_1_4");
+        assert_eq!(tc.name, "CREATE_FILE");
+        assert_eq!(tc.canonical_path, Some("create_path".to_string()));
+        assert_eq!(
+            tc.args,
+            serde_json::json!({
+                "file_path": "create_path",
+                "contents": "create_contents"
+            })
+        );
+
+        // 5. EditFile
+        let step_update_edit = StepUpdate {
+            trajectory_id: Some("traj_1".to_string()),
+            step_index: Some(5),
+            edit_file: Some(ActionEditFile {
+                file_path: Some("edit_path".to_string()),
+                diff_block: vec![],
+            }),
+            ..Default::default()
+        };
+        let tc = extract_builtin_tool_call(&step_update_edit).unwrap();
+        assert_eq!(tc.id, "traj_1_5");
+        assert_eq!(tc.name, "EDIT_FILE");
+        assert_eq!(tc.canonical_path, Some("edit_path".to_string()));
+        assert_eq!(
+            tc.args,
+            serde_json::json!({
+                "file_path": "edit_path"
+            })
+        );
+
+        // 6. None
+        let step_update_none = StepUpdate {
+            trajectory_id: Some("traj_1".to_string()),
+            step_index: Some(6),
+            ..Default::default()
+        };
+        assert!(extract_builtin_tool_call(&step_update_none).is_none());
+        assert!(extract_tool_result(&step_update_none).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wasm_connection_integration_mock() {
+        // Bind to a free local port
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Spawn the mock WebSocket server in the background
+        let server_handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws_stream = accept_async(stream).await.unwrap();
+
+            // 1. Receive the InitializeConversationEvent configuration message
+            let msg = ws_stream.next().await.unwrap().unwrap();
+            let text = msg.to_text().unwrap();
+            assert!(text.contains("InitializeConversationEvent") || text.contains("cascadeId"));
+
+            // 2. Send trajectoryStateUpdate (RUNNING)
+            let traj_running = serde_json::json!({
+                "trajectoryStateUpdate": {
+                    "trajectoryId": "test_traj",
+                    "state": "STATE_RUNNING"
+                }
+            });
+            ws_stream
+                .send(WsMessage::Text(traj_running.to_string()))
+                .await
+                .unwrap();
+
+            // 3. Send StepUpdate
+            let step_update = serde_json::json!({
+                "stepUpdate": {
+                    "stepIndex": 1,
+                    "cascadeId": "test_traj",
+                    "trajectoryId": "test_traj",
+                    "text": "Hello from mock harness!",
+                    "textDelta": "Hello from mock harness!",
+                    "state": "STATE_ACTIVE",
+                    "source": "SOURCE_MODEL",
+                    "target": "TARGET_USER"
+                }
+            });
+            ws_stream
+                .send(WsMessage::Text(step_update.to_string()))
+                .await
+                .unwrap();
+
+            // 4. Send trajectoryStateUpdate (IDLE)
+            let traj_idle = serde_json::json!({
+                "trajectoryStateUpdate": {
+                    "trajectoryId": "test_traj",
+                    "state": "STATE_IDLE"
+                }
+            });
+            ws_stream
+                .send(WsMessage::Text(traj_idle.to_string()))
+                .await
+                .unwrap();
+
+            // 5. Wait for the client to send "hello"
+            let msg2 = ws_stream.next().await.unwrap().unwrap();
+            let text2 = msg2.to_text().unwrap();
+            assert!(text2.contains("hello"));
+
+            // Keep connection open long enough
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+
+        // Configure host/port via static atomic variable (safe, no unsafe_code)
+        TEST_PORT.store(port, std::sync::atomic::Ordering::SeqCst);
+
+        // Instantiate strategy
+        let mut gemini_config = GeminiConfig::default();
+        gemini_config.api_key = Some("mock_key".to_string());
+        let strategy = WasmConnectionStrategy {
+            gemini_config,
+            capabilities_config: CapabilitiesConfig::default(),
+            system_instructions: None,
+            save_dir: None,
+            workspaces: vec![],
+            skills_paths: vec![],
+            tool_runner: None,
+            hook_runner: None,
+            conversation_id: "test_traj".to_string(),
+        };
+
+        // Connect
+        let conn = strategy.connect().await.unwrap();
+        assert_eq!(conn.conversation_id(), "test_traj");
+
+        // Consume the step stream
+        let mut steps = conn.receive_steps();
+        let step = steps.next().await.unwrap().unwrap();
+        assert_eq!(step.content, "Hello from mock harness!");
+        assert_eq!(step.step_index, 1);
+
+        // Stream should end (returns None) once transitioned to IDLE
+        let next_step = steps.next().await;
+        assert!(next_step.is_none());
+
+        // Send a message
+        conn.send("hello").await.unwrap();
+
+        // Join the server task
+        server_handle.await.unwrap();
+    }
 }

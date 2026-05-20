@@ -1,8 +1,13 @@
+#[cfg(not(target_arch = "wasm32"))]
 use antigravity_sdk_rust::proto::localharness::{InputConfig, OutputConfig};
+#[cfg(not(target_arch = "wasm32"))]
 use prost::Message;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::{Command, Stdio};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting localharness...");
 
@@ -81,3 +86,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
