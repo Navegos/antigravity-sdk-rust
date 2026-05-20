@@ -21,6 +21,9 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <link rel="preconnect" href="https://fonts.googleapis.com" />
                 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="true" />
                 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+                <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+                <script type="module" inner_html="import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs'; window.mermaid = mermaid; mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });" />
                 <AutoReload options=options.clone() />
                 <HydrationScripts options=options.clone() root="" />
                 <MetaTags />
@@ -95,18 +98,40 @@ fn ChatPage() -> impl IntoView {
         }
     });
 
-    // Auto-scroll messages container to bottom when messages or streaming content updates
+    // Auto-scroll messages container to bottom when messages or streaming content updates,
+    // and run client-side formatting (syntax highlighting, mermaid diagram rendering).
     Effect::new(move |_| {
         let _ = messages.get();
         let _ = streaming_content.get();
         #[cfg(feature = "hydrate")]
         {
+            // Auto-scroll
             if let Some(el) = messages_container_ref.get() {
                 request_animation_frame(move || {
                     let scroll_height = el.scroll_height();
                     el.set_scroll_top(scroll_height);
                 });
             }
+
+            // Client-side markdown enhancements (syntax highlighting & Mermaid diagrams)
+            request_animation_frame(move || {
+                // Convert <pre><code class="language-mermaid"> to <div class="mermaid">
+                let _ = js_sys::eval(r#"
+                    document.querySelectorAll('pre code.language-mermaid').forEach((codeEl) => {
+                        const preEl = codeEl.parentElement;
+                        if (preEl) {
+                            const div = document.createElement('div');
+                            div.className = 'mermaid';
+                            div.textContent = codeEl.textContent;
+                            preEl.replaceWith(div);
+                        }
+                    });
+                "#);
+                // Trigger highlight.js syntax highlighting
+                let _ = js_sys::eval("if (window.hljs) { window.hljs.highlightAll(); }");
+                // Trigger mermaid rendering
+                let _ = js_sys::eval("if (window.mermaid) { window.mermaid.run(); }");
+            });
         }
     });
 

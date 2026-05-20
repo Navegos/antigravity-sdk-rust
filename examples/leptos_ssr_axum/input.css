@@ -176,3 +176,42 @@ body {
   background-color: rgba(47, 47, 47, 0.3);
 }
 
+/* Media styles */
+.markdown-content img,
+.markdown-content video {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.75rem;
+  margin-top: 1rem;
+  margin-bottom: 1rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+.dark .markdown-content img,
+.dark .markdown-content video {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  border: 1px solid #2f2f2f;
+}
+
+/* Mermaid SVG charts styling */
+.markdown-content .mermaid {
+  background-color: transparent;
+  padding: 1rem;
+  border-radius: 0.75rem;
+  margin-top: 1.5rem;
+  margin-bottom: 1.5rem;
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+}
+
+/* Task lists styling */
+.markdown-content input[type="checkbox"] {
+  margin-right: 0.5rem;
+  accent-color: #10a37f;
+  width: 0.95rem;
+  height: 0.95rem;
+  vertical-align: middle;
+}
+
+
