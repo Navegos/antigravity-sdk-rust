@@ -1,46 +1,10 @@
+use components::{Route, Router, Routes};
 use leptos::prelude::*;
 use leptos_meta::*;
-use serde::{Deserialize, Serialize};
+use leptos_router::*;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub is_user: bool,
-    pub text: String,
-}
-
-#[server(SendMessage)]
-pub async fn send_message(
-    message: String,
-    conversation_id: String,
-) -> Result<String, ServerFnError> {
-    use antigravity_sdk_rust::agent::{Agent, AgentConfig};
-    use antigravity_sdk_rust::policy;
-
-    let mut config = AgentConfig::default();
-    config.conversation_id = Some(conversation_id.clone());
-
-    // Persist conversation databases in target/
-    config.save_dir = Some("target/agent_store".to_string());
-
-    // Apply default security policies
-    config.policies = Some(vec![policy::allow_all()]);
-
-    // Start the Agent and execute the session
-    let mut agent = Agent::new(config);
-    agent
-        .start()
-        .await
-        .map_err(|e| ServerFnError::new(format!("Harness start failed: {e}")))?;
-
-    let response = agent
-        .chat(&message)
-        .await
-        .map_err(|e| ServerFnError::new(format!("Agent communication error: {e}")))?;
-
-    let _ = agent.stop().await;
-
-    Ok(response.text)
-}
+#[cfg(feature = "hydrate")]
+use web_sys::window;
 
 #[cfg(feature = "ssr")]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -63,320 +27,269 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 
 #[component]
 pub fn App() -> impl IntoView {
+    // Provides context that manages stylesheets, titles, meta tags, etc.
     provide_meta_context();
+
+    let fallback = || view! { "Page not found." }.into_view();
 
     view! {
         <Stylesheet id="leptos" href="/pkg/leptos_ssr_axum.css" />
-        <Title text="Antigravity Agent Interface" />
-        <main>
-            <ChatInterface />
-        </main>
+        <Meta
+            name="description"
+            content="A website running its server-side as a WASI Component :D"
+        />
+
+        <Title text="Welcome to Leptos X Spin!" />
+
+        <Router>
+            <main>
+                <Routes fallback>
+                    <Route path=path!("") view=HomePage />
+                    <Route path=path!("/*any") view=NotFound />
+                </Routes>
+            </main>
+        </Router>
     }
 }
 
+/// Renders the home page of your application.
 #[component]
-pub fn ChatInterface() -> impl IntoView {
-    // Unique conversation ID for this session
-    let conversation_id = "leptos-ssr-demo".to_string();
+fn HomePage() -> impl IntoView {
+    let increment_action = ServerAction::<IncrementCount>::new();
 
-    let (messages, set_messages) = signal(vec![
-        ChatMessage {
-            is_user: false,
-            text: "Welcome to the Google Antigravity Agent Chat! I can execute shell commands, edit files, and run tasks directly. Try asking me to run a command or write a file.".to_string(),
-        }
-    ]);
+    // Local optimistic count state
+    let (optimistic_count, set_optimistic_count) = signal(None::<u32>);
 
-    let (input_text, set_input_text) = signal(String::new());
-    let send_action = ServerAction::<SendMessage>::new();
+    // Server count resource
+    let count = Resource::new(move || increment_action.version().get(), |_| get_count());
 
-    // Triggered when user submits a message
-    let on_submit = move |ev: leptos::web_sys::SubmitEvent| {
-        ev.prevent_default();
-        let prompt = input_text.get().trim().to_string();
-        if prompt.is_empty() {
-            return;
-        }
-
-        // Optimistically add user's prompt
-        set_messages.update(|msgs| {
-            msgs.push(ChatMessage {
-                is_user: true,
-                text: prompt.clone(),
-            });
-        });
-
-        // Clear input box
-        set_input_text.set(String::new());
-
-        // Dispatch server action
-        send_action.dispatch(SendMessage {
-            message: prompt,
-            conversation_id: conversation_id.clone(),
-        });
-    };
-
-    // Watch for response from the server action
-    let value = send_action.value();
+    // Initialize from localStorage or server
     Effect::new(move |_| {
-        if let Some(res) = value.get() {
-            match res {
-                Ok(reply) => {
-                    set_messages.update(|msgs| {
-                        msgs.push(ChatMessage {
-                            is_user: false,
-                            text: reply,
-                        });
-                    });
+        if optimistic_count.get().is_none() {
+            // Try to get from localStorage first
+            #[cfg(feature = "hydrate")]
+            {
+                if let Some(window) = window() {
+                    if let Ok(Some(storage)) = window.local_storage() {
+                        if let Ok(Some(cached_count_str)) = storage.get_item("spin_counter_count") {
+                            if let Ok(cached_count) = cached_count_str.parse::<u32>() {
+                                set_optimistic_count.set(Some(cached_count));
+                                return;
+                            }
+                        }
+                    }
                 }
-                Err(err) => {
-                    set_messages.update(|msgs| {
-                        msgs.push(ChatMessage {
-                            is_user: false,
-                            text: format!("Error: {}", err),
-                        });
-                    });
+            }
+
+            // Fallback to server count
+            if let Some(Ok(server_count)) = count.get() {
+                set_optimistic_count.set(Some(server_count));
+
+                // Cache in localStorage
+                #[cfg(feature = "hydrate")]
+                {
+                    if let Some(window) = window() {
+                        if let Ok(Some(storage)) = window.local_storage() {
+                            let _ = storage.set_item("spin_counter_count", &server_count.to_string());
+                        }
+                    }
                 }
             }
         }
     });
 
-    let is_pending = send_action.pending();
+    // Sync server updates to localStorage
+    Effect::new(move |_| {
+        if let Some(Ok(server_count)) = count.get() {
+            // Only update if we have a successful server response and it's different
+            if let Some(current_optimistic) = optimistic_count.get() {
+                if server_count != current_optimistic {
+                    set_optimistic_count.set(Some(server_count));
+                }
+            }
+
+            // Always update localStorage with server value
+            #[cfg(feature = "hydrate")]
+            {
+                if let Some(window) = window() {
+                    if let Ok(Some(storage)) = window.local_storage() {
+                        let _ = storage.set_item("spin_counter_count", &server_count.to_string());
+                    }
+                }
+            }
+        }
+    });
+
+    // Optimistic increment
+    let on_click = move |_| {
+        // Immediately update UI
+        let new_count = optimistic_count.get().unwrap_or(0) + 1;
+        set_optimistic_count.set(Some(new_count));
+
+        // Update localStorage immediately
+        #[cfg(feature = "hydrate")]
+        {
+            if let Some(window) = window() {
+                if let Ok(Some(storage)) = window.local_storage() {
+                    let _ = storage.set_item("spin_counter_count", &new_count.to_string());
+                }
+            }
+        }
+
+        // Trigger server action
+        increment_action.dispatch(IncrementCount {});
+    };
 
     view! {
-        <style>
-            r#"
-            body {
-                background: radial-gradient(circle at top right, #1a1c29 0%, #0d0e15 100%);
-                min-height: 100vh;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                padding: 20px;
-                box-sizing: border-box;
-            }
-
-            .chat-container {
-                width: 100%;
-                max-width: 800px;
-                height: 80vh;
-                background: rgba(22, 24, 37, 0.7);
-                backdrop-filter: blur(20px);
-                -webkit-backdrop-filter: blur(20px);
-                border: 1px solid rgba(255, 255, 255, 0.08);
-                border-radius: 24px;
-                box-shadow: 0 20px 50px rgba(0, 0, 0, 0.4);
-                display: flex;
-                flex-direction: column;
-                overflow: hidden;
-                transition: transform 0.3s ease, box-shadow 0.3s ease;
-            }
-
-            .chat-header {
-                padding: 24px;
-                background: rgba(255, 255, 255, 0.02);
-                border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-                display: flex;
-                align-items: center;
-                gap: 16px;
-            }
-
-            .header-dot {
-                width: 12px;
-                height: 12px;
-                background: #6366f1;
-                border-radius: 50%;
-                box-shadow: 0 0 12px #6366f1;
-                animation: glow 2s infinite ease-in-out;
-            }
-
-            .header-title {
-                font-size: 1.25rem;
-                font-weight: 600;
-                background: linear-gradient(to right, #ffffff, #a5b4fc);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                margin: 0;
-            }
-
-            .messages-list {
-                flex: 1;
-                padding: 24px;
-                overflow-y: auto;
-                display: flex;
-                flex-direction: column;
-                gap: 20px;
-            }
-
-            .message-wrapper {
-                display: flex;
-                width: 100%;
-            }
-
-            .message-wrapper.user {
-                justify-content: flex-end;
-            }
-
-            .message-wrapper.assistant {
-                justify-content: flex-start;
-            }
-
-            .message-bubble {
-                max-width: 75%;
-                padding: 16px 20px;
-                border-radius: 18px;
-                line-height: 1.5;
-                font-size: 0.95rem;
-                white-space: pre-wrap;
-                word-break: break-word;
-                animation: popIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-            }
-
-            .message-wrapper.user .message-bubble {
-                background: linear-gradient(135deg, #4f46e5 0%, #3730a3 100%);
-                color: #ffffff;
-                border-bottom-right-radius: 4px;
-                box-shadow: 0 4px 15px rgba(79, 70, 229, 0.3);
-            }
-
-            .message-wrapper.assistant .message-bubble {
-                background: rgba(255, 255, 255, 0.05);
-                color: #e2e8f0;
-                border-bottom-left-radius: 4px;
-                border: 1px solid rgba(255, 255, 255, 0.04);
-            }
-
-            .typing-indicator {
-                display: flex;
-                gap: 6px;
-                padding: 16px 20px;
-                background: rgba(255, 255, 255, 0.03);
-                border-radius: 18px;
-                border-bottom-left-radius: 4px;
-                width: fit-content;
-                animation: popIn 0.3s ease;
-            }
-
-            .typing-dot {
-                width: 8px;
-                height: 8px;
-                background: #a5b4fc;
-                border-radius: 50%;
-                animation: bounce 1.4s infinite ease-in-out both;
-            }
-
-            .typing-dot:nth-child(1) { animation-delay: -0.32s; }
-            .typing-dot:nth-child(2) { animation-delay: -0.16s; }
-
-            .input-form {
-                padding: 20px 24px;
-                background: rgba(255, 255, 255, 0.01);
-                border-top: 1px solid rgba(255, 255, 255, 0.06);
-                display: flex;
-                gap: 12px;
-            }
-
-            .chat-input {
-                flex: 1;
-                background: rgba(255, 255, 255, 0.04);
-                border: 1px solid rgba(255, 255, 255, 0.08);
-                border-radius: 14px;
-                padding: 16px 20px;
-                color: #ffffff;
-                font-family: inherit;
-                font-size: 0.95rem;
-                outline: none;
-                transition: border-color 0.2s ease, background-color 0.2s ease;
-            }
-
-            .chat-input:focus {
-                border-color: #6366f1;
-                background: rgba(255, 255, 255, 0.06);
-            }
-
-            .send-button {
-                background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-                color: #ffffff;
-                border: none;
-                border-radius: 14px;
-                padding: 0 28px;
-                font-weight: 600;
-                font-family: inherit;
-                font-size: 0.95rem;
-                cursor: pointer;
-                transition: transform 0.1s ease, box-shadow 0.2s ease;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-
-            .send-button:hover {
-                box-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
-            }
-
-            .send-button:active {
-                transform: scale(0.97);
-            }
-
-            @keyframes glow {
-                0%, 100% { opacity: 0.6; box-shadow: 0 0 8px #6366f1; }
-                50% { opacity: 1; box-shadow: 0 0 16px #818cf8; }
-            }
-
-            @keyframes popIn {
-                from { opacity: 0; transform: translateY(8px) scale(0.98); }
-                to { opacity: 1; transform: translateY(0) scale(1); }
-            }
-
-            @keyframes bounce {
-                0%, 80%, 100% { transform: scale(0); }
-                40% { transform: scale(1); }
-            }
-            "#
-        </style>
-
-        <div class="chat-container">
-            <div class="chat-header">
-                <div class="header-dot"></div>
-                <h1 class="header-title">Antigravity SDK Assistant</h1>
-            </div>
-
-            <div class="messages-list">
-                <For
-                    each=move || messages.get()
-                    key=|msg| msg.text.clone()
-                    let:msg
-                >
-                    <div class=move || if msg.is_user { "message-wrapper user" } else { "message-wrapper assistant" }>
-                        <div class="message-bubble">
-                            {msg.text}
+        <div class="min-h-screen bg-[#1a2332] flex items-center justify-center p-4">
+            <div class="bg-[#263343] rounded-xl shadow-2xl p-8 md:p-12 max-w-md w-full border border-[#3a4a5c]">
+                <div class="text-center space-y-8">
+                    // Header
+                    <div class="space-y-2">
+                        <div class="flex items-center justify-center gap-3 mb-4">
+                            // Fermyon-style logo placeholder
+                            <div class="w-10 h-10 bg-[#00d4aa] rounded-lg flex items-center justify-center">
+                                <span class="text-[#1a2332] font-bold text-xl">C</span>
+                            </div>
+                            <h1 class="text-3xl md:text-4xl font-medium text-white">
+                                "spin-counter"
+                            </h1>
                         </div>
+                        <p class="text-[#8b9cb8] text-sm">
+                            "Powered by Fermyon Spin + Leptos + WASM"
+                        </p>
                     </div>
-                </For>
 
-                <Show when=move || is_pending.get()>
-                    <div class="message-wrapper assistant">
-                        <div class="typing-indicator">
-                            <div class="typing-dot"></div>
-                            <div class="typing-dot"></div>
-                            <div class="typing-dot"></div>
+                    // Counter Display
+                    <div class="relative">
+                        <div class="bg-[#1a2332] rounded-lg p-8 border border-[#3a4a5c]">
+                            <div class="text-5xl md:text-6xl font-light text-white tabular-nums">
+                                {move || {
+                                    optimistic_count.get()
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "...".to_string())
+                                }}
+                            </div>
+                            <div class="text-[#8b9cb8] text-sm mt-2 uppercase tracking-wider">
+                                "Count Value"
+                            </div>
                         </div>
-                    </div>
-                </Show>
-            </div>
 
-            <form class="input-form" on:submit=on_submit>
-                <input
-                    type="text"
-                    class="chat-input"
-                    placeholder="Ask the agent to write a file or run a command..."
-                    prop:value=move || input_text.get()
-                    on:input=move |ev| set_input_text.set(event_target_value(&ev))
-                    disabled=move || is_pending.get()
-                />
-                <button type="submit" class="send-button" disabled=move || is_pending.get()>
-                    "Send"
-                </button>
-            </form>
+                        // Loading indicator overlay
+                        <Show when=move || increment_action.pending().get()>
+                            <div class="absolute inset-0 flex items-center justify-center bg-[#1a2332]/50 rounded-lg">
+                                <div class="animate-spin rounded-full h-8 w-8 border-2 border-transparent border-t-[#00d4aa]"></div>
+                            </div>
+                        </Show>
+                    </div>
+
+                    // Button
+                    <button
+                        on:click=on_click
+                        disabled=move || increment_action.pending().get()
+                        class="w-full rounded-lg bg-[#00d4aa] px-6 py-3 text-[#1a2332] font-medium transition-all duration-200 hover:bg-[#00b894] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#00d4aa]"
+                    >
+                        {move || if increment_action.pending().get() {
+                            "Updating..."
+                        } else {
+                            "Increment Counter"
+                        }}
+                    </button>
+
+                    // Status indicators
+                    <div class="flex items-center justify-center gap-2 text-xs">
+                        <div class={move || {
+                            if optimistic_count.get().is_none() {
+                                "w-2 h-2 rounded-full bg-yellow-500 animate-pulse"
+                            } else if increment_action.pending().get() {
+                                "w-2 h-2 rounded-full bg-[#00d4aa] animate-pulse"
+                            } else {
+                                "w-2 h-2 rounded-full bg-[#00d4aa]"
+                            }
+                        }}>
+                        </div>
+                        <span class="text-[#8b9cb8] uppercase tracking-wider">
+                            {move || {
+                                if optimistic_count.get().is_none() {
+                                    "Loading"
+                                } else if increment_action.pending().get() {
+                                    "Syncing"
+                                } else {
+                                    "Ready"
+                                }
+                            }}
+                        </span>
+                    </div>
+
+                    // Footer info
+                    <div class="pt-4 border-t border-[#3a4a5c]">
+                        <p class="text-[#8b9cb8] text-xs">
+                            "Running on Fermyon Cloud"
+                        </p>
+                    </div>
+                </div>
+            </div>
         </div>
     }
+}
+
+/// 404 - Not Found
+#[component]
+fn NotFound() -> impl IntoView {
+    // set an HTTP status code 404
+    // this is feature gated because it can only be done during
+    // initial server-side rendering
+    // if you navigate to the 404 page subsequently, the status
+    // code will not be set because there is not a new HTTP request
+    // to the server
+    #[cfg(feature = "ssr")]
+    {
+        // this can be done inline because it's synchronous
+        // if it were async, we'd use a server function
+        if let Some(resp) = use_context::<leptos_wasi::response::ResponseOptions>() {
+            resp.set_status(leptos_wasi::prelude::StatusCode::NOT_FOUND);
+        }
+    }
+
+    view! { <h1>"Not Found"</h1> }
+}
+
+#[server(prefix = "/api")]
+pub async fn get_count() -> Result<u32, ServerFnError<String>> {
+    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
+    match store.get_json::<u32>("spin_counter_count") {
+        Ok(Some(count)) => {
+            println!("Retrieved count: {count}");
+            Ok(count)
+        }
+        Ok(None) => {
+            println!("No count found, returning 0");
+            Ok(0)
+        }
+        Err(e) => {
+            eprintln!("Error retrieving count: {e}");
+            Ok(0)
+        }
+    }
+}
+
+#[server(prefix = "/api")]
+pub async fn increment_count() -> Result<(), ServerFnError<String>> {
+    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
+
+    // Get current count
+    let current_count = match store.get_json::<u32>("spin_counter_count") {
+        Ok(Some(count)) => count,
+        Ok(None) => 0,
+        Err(_) => 0,
+    };
+
+    let new_count = current_count + 1;
+    println!("Incrementing count from {current_count} to {new_count}");
+
+    store
+        .set_json("spin_counter_count", &new_count)
+        .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+
+    Ok(())
 }

@@ -12,7 +12,8 @@ component = "leptos-ssr-axum"
 
 [component.leptos-ssr-axum]
 source = "target/wasm32-wasip1/release/leptos_ssr_axum.wasm"
-allowed_outbound_hosts = ["127.0.0.1:8000"]
+allowed_outbound_hosts = []
+key_value_stores = ["default"]
 [component.leptos-ssr-axum.build]
 command = "cargo leptos build --release && LEPTOS_OUTPUT_NAME=leptos_ssr_axum cargo build --lib --target wasm32-wasip1 --release --no-default-features --features ssr"
 watch = ["src/**/*.rs", "Cargo.toml"]

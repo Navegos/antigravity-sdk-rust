@@ -7,7 +7,7 @@ use leptos_wasi::{
 use wasi::exports::http::incoming_handler::Guest;
 use wasi::http::proxy::export;
 
-use crate::app::{App, SendMessage, shell};
+use crate::app::{shell, App, GetCount, IncrementCount};
 
 struct LeptosServer;
 
@@ -39,7 +39,8 @@ async fn handle_request(
 
     Handler::build(request, response_out)?
         // NOTE: Add all server functions here to ensure functionality works as expected!
-        .with_server_fn::<SendMessage, _>()
+        .with_server_fn::<GetCount, _>()
+        .with_server_fn::<IncrementCount, _>()
         // Fetch all available routes from your App.
         .generate_routes(App)
         // Actually process the request and write the response.

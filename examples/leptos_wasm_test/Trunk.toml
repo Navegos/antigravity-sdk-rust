@@ -1,6 +1,0 @@
-[build]
-target = "index.html"
-release = true
-
-[serve]
-port = 8080
