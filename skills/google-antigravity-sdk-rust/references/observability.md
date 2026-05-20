@@ -8,11 +8,11 @@ Each conversation `Step` returned by the WebSocket server contains a `usage_meta
 
 ```rust
 pub struct UsageMetadata {
-    pub prompt_token_count: u32,
-    pub candidates_token_count: u32,
-    pub total_token_count: u32,
-    pub cached_content_token_count: u32,
-    pub thoughts_token_count: u32,
+    pub prompt_token_count: i32,
+    pub candidates_token_count: i32,
+    pub total_token_count: i32,
+    pub cached_content_token_count: i32,
+    pub thoughts_token_count: i32,
 }
 ```
 

@@ -11,14 +11,12 @@ use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::policy;
 use antigravity_sdk_rust::tools::Tool;
 use antigravity_sdk_rust::types::GeminiConfig;
-use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
 // 1. Define the custom tool struct
 pub struct WeatherTool;
 
-#[async_trait]
 impl Tool for WeatherTool {
     fn name(&self) -> &str {
         "get_current_temperature"
@@ -41,15 +39,17 @@ impl Tool for WeatherTool {
         }"#
     }
 
-    async fn call(&self, args: Value) -> Result<Value, anyhow::Error> {
-        let location = args
-            .get("location")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("Missing 'location' parameter"))?;
-        
-        // In a real application, call an external weather API here
-        let temperature = format!("The temperature in {} is 72°F.", location);
-        Ok(Value::String(temperature))
+    fn call(&self, args: Value) -> impl std::future::Future<Output = Result<Value, anyhow::Error>> + Send {
+        async move {
+            let location = args
+                .get("location")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("Missing 'location' parameter"))?;
+            
+            // In a real application, call an external weather API here
+            let temperature = format!("The temperature in {} is 72°F.", location);
+            Ok(Value::String(temperature))
+        }
     }
 }
 
@@ -86,7 +86,6 @@ Here is how to implement a stateful fruit count tracker tool:
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::policy;
 use antigravity_sdk_rust::tools::Tool;
-use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -104,7 +103,6 @@ impl FruitInventoryTool {
     }
 }
 
-#[async_trait]
 impl Tool for FruitInventoryTool {
     fn name(&self) -> &str {
         "record_fruit"
@@ -131,28 +129,30 @@ impl Tool for FruitInventoryTool {
         }"#
     }
 
-    async fn call(&self, args: Value) -> Result<Value, anyhow::Error> {
-        let fruit_name = args
-            .get("fruit_name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("Missing 'fruit_name'"))?;
-        let count = args
-            .get("count")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| anyhow::anyhow!("Missing 'count'"))? as i32;
+    fn call(&self, args: Value) -> impl std::future::Future<Output = Result<Value, anyhow::Error>> + Send {
+        async move {
+            let fruit_name = args
+                .get("fruit_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("Missing 'fruit_name'"))?;
+            let count = args
+                .get("count")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow::anyhow!("Missing 'count'"))? as i32;
 
-        let mut inv = self
-            .inventory
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Mutex lock poisoned: {}", e))?;
-        let entry = inv.entry(fruit_name.to_string()).or_insert(0);
-        *entry += count;
+            let mut inv = self
+                .inventory
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Mutex lock poisoned: {}", e))?;
+            let entry = inv.entry(fruit_name.to_string()).or_insert(0);
+            *entry += count;
 
-        let result_msg = format!(
-            "Recorded {} {}(s). Total {} count is now {}.",
-            count, fruit_name, fruit_name, *entry
-        );
-        Ok(Value::String(result_msg))
+            let result_msg = format!(
+                "Recorded {} {}(s). Total {} count is now {}.",
+                count, fruit_name, fruit_name, *entry
+            );
+            Ok(Value::String(result_msg))
+        }
     }
 }
 

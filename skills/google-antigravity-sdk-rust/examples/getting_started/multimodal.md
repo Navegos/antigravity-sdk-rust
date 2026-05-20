@@ -9,8 +9,7 @@ To enable the agent to generate images on request, you must add `BuiltinTools::G
 ```rust
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::policy;
-use antigravity_sdk_rust::types::{BuiltinTools, CapabilitiesConfig, GeminiConfig};
-use std::sync::Arc;
+use antigravity_sdk_rust::types::{BuiltinTools, CapabilitiesConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {

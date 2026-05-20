@@ -23,6 +23,24 @@ Ensure the following prerequisites are met before building or running agents:
 
 ---
 
+## WebAssembly (wasm32-wasip1) Target Guidelines
+
+When designing and deploying agents to WebAssembly targets such as `wasm32-wasip1` (e.g., inside Spin or standard WASI runtimes):
+
+1. **Compilation Check**: Always verify clean target compilation:
+   ```sh
+   cargo check --target wasm32-wasip1
+   ```
+2. **Connection Protocol**: Be aware that process spawning is not supported inside WebAssembly sandboxes. Instead of native subprocess IPC, use the direct network socket strategy (`WasmConnectionStrategy` / `WasmConnection`) to connect to a host-side `localharness` WebSocket server.
+3. **Core Async Traits**: Do NOT use the `#[async_trait]` attribute macro. The SDK uses native async traits (stable since Rust 1.75 / Rust 2024). Standard traits like `Connection`, `Hook`, `Tool`, and `Trigger` are implemented as native async traits (using `impl Future + Send` returns for trait-level `Send` bounds). For dynamic dispatch and runtime storage (e.g. `Arc<dyn DynHook>`), the SDK provides companion object-safe traits (`DynHook`, `DynTool`, `DynTrigger`) which are automatically implemented via blanket implementations for any type implementing the base trait.
+4. **Mock Test Suite Guidelines**: To test connection, event loops, and tool extractions under simulated WebSocket messaging, run:
+   ```sh
+   cargo test wasm::tests
+   ```
+   * **Writing Mock Tests**: Mock tests should spin up a local WebSocket listener, bind to port `0` to allocate a free TCP port dynamically, record that port, configure `WasmConnectionStrategy` to point to it, and mock standard JSON frames (`StepUpdate`, `TrajectoryStateUpdate`, etc.) to verify client state transitions.
+
+---
+
 ## Routing Table
 
 Use the links below to navigate specific topics and code configurations:
@@ -72,3 +90,5 @@ Use the links below to navigate specific topics and code configurations:
   See [agent_skills.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/agent_skills.md).
 * **Policies**: Lock workspace directories and filter command lines.
   See [policies.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/policies.md).
+* **Streaming**: Stream chat responses and distinguish reasoning thoughts from response text in real time.
+  See [streaming.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/streaming.md).

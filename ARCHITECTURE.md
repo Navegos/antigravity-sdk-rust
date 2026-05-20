@@ -41,7 +41,7 @@ The SDK leverages several object-oriented and functional design patterns:
   - `post_tool_call()`
   - `on_tool_error()`
   - `on_interaction()`
-- **HookRunner**: Coordinates a thread-safe list of observers (`Arc<dyn Hook>`) and dispatches events asynchronously.
+- **HookRunner**: Coordinates a thread-safe list of observers (`Arc<dyn DynHook>`) and dispatches events asynchronously.
 
 ### 3. Middleware / Interceptor Pattern (`policy.rs`)
 - **Policy**: Acts as a middleware layer to authorize, deny, or intercept tool calls before they are executed.
@@ -139,7 +139,7 @@ Standard native runtimes run on multi-threaded thread pools. In contrast, WASM r
 The SDK has been fully refactored to leverage native async traits (stable since Rust 1.75 / Rust 2024), completely removing the dependency on the `#[async_trait]` macro.
 
 - **Native Async Traits**: Traits like `Connection`, `Hook`, `Tool`, and `Trigger` are implemented as native async traits using standard `async fn` syntax or returning `impl Future + Send` to ensure compiler-enforced thread safety boundaries.
-- **Companion Trait Pattern for Dynamic Dispatch**: Native async traits are not directly object-safe (`dyn Trait` compatible) because they return anonymous concrete futures. To support dynamic dispatch, the SDK defines companion traits `DynConnection`, `DynHook`, `DynTool`, and `DynTrigger` which are object-safe and return boxed futures (`BoxFuture`).
+- **Companion Trait Pattern for Dynamic Dispatch**: Native async traits are not directly object-safe (`dyn Trait` compatible) because they return anonymous concrete futures. To support dynamic dispatch, the SDK defines companion traits `DynHook`, `DynTool`, and `DynTrigger` which are object-safe and return boxed futures (`BoxFuture`).
 - **Zero-overhead Blanket Implementations**: The companion traits are automatically implemented via blanket implementations for any type implementing the base trait:
   ```rust
   pub trait DynHook: Send + Sync {
@@ -154,4 +154,4 @@ The SDK has been fully refactored to leverage native async traits (stable since 
       // ...
   }
   ```
-  This provides the best of both worlds: clean, idiomatic implementation of async traits for developers using standard Rust 2024 features, while preserving the internal ability to handle collections of dynamic trait objects (e.g. `Arc<dyn DynHook>` in `HookRunner`, `Box<dyn DynTool>` in `ToolRunner`, `AnyConnection` enum dispatch, etc.).
+  This provides the best of both worlds: clean, idiomatic implementation of async traits for developers using standard Rust 2024 features, while preserving the internal ability to handle collections of dynamic trait objects (e.g. `Arc<dyn DynHook>` in `HookRunner`, `Arc<dyn DynTool>` in `ToolRunner`, `AnyConnection` enum dispatch, etc.).

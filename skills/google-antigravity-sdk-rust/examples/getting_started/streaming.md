@@ -26,7 +26,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let prompt = "Explain quantum physics in one sentence. Show your thinking.";
 
-    // 1. Get a mutable handle on the conversation
+    // 1. Get a handle on the conversation
     let conversation = agent.conversation()?;
     
     // 2. Start the chat stream

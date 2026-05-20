@@ -21,9 +21,7 @@ The SDK provides a thread-safe lifecycle hook mechanism. Registering structures 
 
 ```rust
 use antigravity_sdk_rust::types::{ToolCall, ToolResult, HookResult, AskQuestionEntry, QuestionHookResult};
-use async_trait::async_trait;
 
-#[async_trait]
 pub trait Hook: Send + Sync {
     /// Triggered when the subprocess is initialized and the session starts.
     async fn on_session_start(&self) -> Result<(), anyhow::Error> {
@@ -84,12 +82,10 @@ Below is an implementation of a custom monitoring hook that logs tool execution 
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::hooks::Hook;
 use antigravity_sdk_rust::types::{ToolCall, ToolResult, HookResult};
-use async_trait::async_trait;
 use std::sync::Arc;
 
 struct DiagnosticLogger;
 
-#[async_trait]
 impl Hook for DiagnosticLogger {
     async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
         println!("[HOOK] Executing Tool: {} with args: {}", tool_call.name, tool_call.args);

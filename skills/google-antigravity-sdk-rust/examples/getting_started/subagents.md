@@ -13,7 +13,6 @@ use antigravity_sdk_rust::policy;
 use antigravity_sdk_rust::types::{
     BuiltinTools, CapabilitiesConfig, GeminiConfig, HookResult, ToolCall, ToolResult,
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,29 +21,32 @@ struct SubagentHook {
     subagent_active: Arc<AtomicBool>,
 }
 
-#[async_trait]
 impl Hook for SubagentHook {
-    async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
-        if tool_call.name == "START_SUBAGENT" {
-            self.subagent_active.store(true, Ordering::SeqCst);
-            println!("\n--- [Hook] Spawning Subagent ---");
-            println!("Arguments: {}\n", tool_call.args);
-        } else {
-            let indent = if self.subagent_active.load(Ordering::SeqCst) { "    " } else { "  " };
-            println!("{}- [Start]: {} (ID: {})", indent, tool_call.name, tool_call.id);
+    fn pre_tool_call<'a>(&'a self, tool_call: &'a ToolCall) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
+        async move {
+            if tool_call.name == "START_SUBAGENT" {
+                self.subagent_active.store(true, Ordering::SeqCst);
+                println!("\n--- [Hook] Spawning Subagent ---");
+                println!("Arguments: {}\n", tool_call.args);
+            } else {
+                let indent = if self.subagent_active.load(Ordering::SeqCst) { "    " } else { "  " };
+                println!("{}- [Start]: {} (ID: {})", indent, tool_call.name, tool_call.id);
+            }
+            Ok(HookResult { allow: true, message: String::new() })
         }
-        Ok(HookResult { allow: true, message: String::new() })
     }
 
-    async fn post_tool_call(&self, result: &ToolResult) -> Result<(), anyhow::Error> {
-        if result.name == "START_SUBAGENT" {
-            self.subagent_active.store(false, Ordering::SeqCst);
-            println!("\n--- [Hook] Subagent Finished ---\n");
-        } else {
-            let indent = if self.subagent_active.load(Ordering::SeqCst) { "    " } else { "  " };
-            println!("{}- [Done]: {} ✅", indent, result.name);
+    fn post_tool_call<'a>(&'a self, result: &'a ToolResult) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async move {
+            if result.name == "START_SUBAGENT" {
+                self.subagent_active.store(false, Ordering::SeqCst);
+                println!("\n--- [Hook] Subagent Finished ---\n");
+            } else {
+                let indent = if self.subagent_active.load(Ordering::SeqCst) { "    " } else { "  " };
+                println!("{}- [Done]: {} ✅", indent, result.name);
+            }
+            Ok(())
         }
-        Ok(())
     }
 }
 

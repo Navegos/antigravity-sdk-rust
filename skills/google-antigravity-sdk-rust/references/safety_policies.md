@@ -8,13 +8,13 @@ Every tool execution request is passed through a sequence of `Policy` middleware
 
 ```rust
 pub enum Decision {
-    Allow,
+    Approve,
     Deny,
     AskUser,
 }
 ```
 
-* **`Allow`**: Explicitly permits execution.
+* **`Approve`**: Explicitly permits execution.
 * **`Deny`**: Instantly blocks execution and returns a policy rejection message to the LLM.
 * **`AskUser`**: Intercepts the call and prompts the user for verification.
 
@@ -54,7 +54,11 @@ let cmd_policy = policy::confirm_run_command(None);
 ## Ordering and Rules Evaluation
 
 > [!IMPORTANT]
-> Policies are evaluated in **reverse order of registration** (last-in, first-evaluated). If a policy matches, its decision is final and subsequent policies are skipped.
+> Policies are compiled into a **6-bucket priority system** where specificity and safety determine precedence:
+>
+> `Specific Deny > Specific Ask > Specific Approve > Wildcard Deny > Wildcard Ask > Wildcard Approve`
+>
+> Within each priority group, policies are evaluated in registration order (first match wins). This means a `deny("tool_name")` always takes priority over an `allow("tool_name")`, and any specific-tool rule always takes priority over a wildcard (`*`) rule, regardless of insertion order.
 
 When custom workspaces are defined in `AgentConfig::workspaces`, workspace scoping policies are automatically prepended, ensuring filesystem path locks are evaluated first.
 
@@ -98,7 +102,7 @@ fn custom_approval_handler(tool_call: &ToolCall) -> bool {
 }
 
 let ask_user_policy = Policy::new(
-    "WRITE_TO_FILE".to_string(),
+    "CREATE_FILE".to_string(),
     Decision::AskUser,
     None, // Matches all file writes
     Some(Arc::new(custom_approval_handler)),

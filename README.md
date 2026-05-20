@@ -139,11 +139,9 @@ impl Tool for WeatherTool {
         }"#
     }
 
-    fn call(&self, args: Value) -> impl std::future::Future<Output = Result<Value, anyhow::Error>> + Send {
-        async move {
-            let city = args.get("city").and_then(|c| c.as_str()).unwrap_or("Tokyo");
-            Ok(serde_json::json!({ "weather": format!("It's sunny in {}", city) }))
-        }
+    async fn call(&self, args: Value) -> Result<Value, anyhow::Error> {
+        let city = args.get("city").and_then(|c| c.as_str()).unwrap_or("Tokyo");
+        Ok(serde_json::json!({ "weather": format!("It's sunny in {}", city) }))
     }
 }
 ```

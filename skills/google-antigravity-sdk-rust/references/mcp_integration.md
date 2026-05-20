@@ -9,10 +9,8 @@ To provide the model with a custom function or action, you must implement the `T
 ### The Tool Trait Definition
 
 ```rust
-use async_trait::async_trait;
 use serde_json::Value;
 
-#[async_trait]
 pub trait Tool: Send + Sync {
     /// The name of the tool exposed to the model (e.g. "my_custom_action").
     fn name(&self) -> &str;
@@ -38,14 +36,12 @@ Below is an implementation of a tool that calculates the hash of a string:
 ```rust
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::tools::Tool;
-use async_trait::async_trait;
 use serde_json::Value;
 use sha2::{Sha256, Digest};
 use std::sync::Arc;
 
 struct HashStringTool;
 
-#[async_trait]
 impl Tool for HashStringTool {
     fn name(&self) -> &str {
         "hash_string"

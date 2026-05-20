@@ -72,13 +72,13 @@ async fn main() -> Result<(), anyhow::Error> {
         policy::allow("RUN_COMMAND"),
         // 4. Allow editing/creating files, but ask the user first if it's a critical file
         Policy::new(
-            "WRITE_TO_FILE".to_string(),
+            "CREATE_FILE".to_string(),
             Decision::AskUser,
             Some(Arc::new(critical_file_predicate)),
             Some(Arc::new(programmatic_approval_handler)),
             "ask-for-critical-writes".to_string(),
         ),
-        policy::allow("WRITE_TO_FILE"),
+        policy::allow("CREATE_FILE"),
     ];
     config.policies = Some(policies);
 
@@ -103,13 +103,13 @@ async fn main() -> Result<(), anyhow::Error> {
 
 ## Detailed Policy Assessment
 
-1. **Deny All**: Placed first in the vector. Since evaluation order is reversed (bottom-to-top), it acts as a final safety fallback blocking unmapped tools.
+1. **Deny All**: A wildcard deny policy. In the bucket-based priority system, specific-tool rules (like `allow("LIST_DIR")`) always take priority over wildcard rules, so this acts as a fallback blocking any tools not explicitly allowed.
 2. **`LIST_DIR`**: Placed next, whitelisting directory viewing.
 3. **`RUN_COMMAND` with Predicate**: 
    * Pre-filters tool arguments.
    * If `CommandLine` includes `"rm"`, evaluation returns `Decision::Deny`, blocking execution instantly.
-   * If it passes, evaluation continues to the next policy (`policy::allow("RUN_COMMAND")`), which allows the tool to run.
-4. **`WRITE_TO_FILE` with Interceptor**:
+   * If the predicate returns `false` (no `rm` found), this deny policy is skipped. The specific allow policy for `RUN_COMMAND` (bucket 2) then matches and permits execution.
+4. **`CREATE_FILE` with Interceptor**:
    * Evaluates if the path ends in `.key` or contains `production`.
    * If it matches, decision is `Decision::AskUser`, redirecting execution flow to `programmatic_approval_handler`.
    * The handler returns `false` (simulating user rejection), blocking the tool call and returning a prompt refusal.
