@@ -269,25 +269,141 @@ fn NotFound() -> impl IntoView {
 
 // ── Server Functions ────────────────────────────────────────────────────────
 
-/// Send a message to the AI agent and get a response.
+/// Helper: call Gemini API synchronously using wasi:http outgoing handler.
+///
+/// We can't use `spin_sdk::http::send().await` inside a `#[server]` fn because
+/// the future is `!Send` (uses `Rc<RefCell>`), but Leptos requires `Send`.
+/// Instead, we build and send the HTTP request using the raw wasi crate types
+/// directly and block on the response pollable.
+#[cfg(feature = "ssr")]
+fn call_gemini(api_key: &str, contents: &serde_json::Value) -> Result<String, String> {
+    use wasi::http::types::{Fields, Method, OutgoingBody, OutgoingRequest, Scheme};
+
+    let model = "gemini-2.5-flash";
+    let path_and_query = format!(
+        "/v1beta/models/{}:generateContent?key={}",
+        model, api_key
+    );
+
+    let request_body = serde_json::json!({
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 2048
+        }
+    });
+
+    let body_bytes = serde_json::to_vec(&request_body).map_err(|e| e.to_string())?;
+
+    // Build the request using the wasi:http types
+    let headers = Fields::from_list(&[
+        ("content-type".to_string(), "application/json".into()),
+        ("content-length".to_string(), body_bytes.len().to_string().into()),
+    ]).map_err(|e| format!("Failed to create headers: {e:?}"))?;
+
+    let outgoing_req = OutgoingRequest::new(headers);
+    outgoing_req
+        .set_method(&Method::Post)
+        .map_err(|_| "Failed to set method".to_string())?;
+    outgoing_req
+        .set_scheme(Some(&Scheme::Https))
+        .map_err(|_| "Failed to set scheme".to_string())?;
+    outgoing_req
+        .set_authority(Some("generativelanguage.googleapis.com"))
+        .map_err(|_| "Failed to set authority".to_string())?;
+    outgoing_req
+        .set_path_with_query(Some(&path_and_query))
+        .map_err(|_| "Failed to set path".to_string())?;
+
+    // Write body
+    let out_body = outgoing_req.body().map_err(|_| "Failed to get body handle".to_string())?;
+    {
+        let stream = out_body.write().map_err(|_| "Failed to get write stream".to_string())?;
+        stream.blocking_write_and_flush(&body_bytes)
+            .map_err(|e| format!("Failed to write body: {e:?}"))?;
+        // Must drop the stream before finishing the body
+    }
+
+    // Finish the body (signals end of request)
+    OutgoingBody::finish(out_body, None)
+        .map_err(|e| format!("Failed to finish body: {e:?}"))?;
+
+    // Send via wasi:http/outgoing-handler
+    let future_response = wasi::http::outgoing_handler::handle(outgoing_req, None)
+        .map_err(|e| format!("Failed to send request: {e:?}"))?;
+
+    // Block until we get the response
+    let incoming_resp = loop {
+        if let Some(result) = future_response.get() {
+            break result
+                .map_err(|_| "Response already consumed".to_string())?
+                .map_err(|e| format!("HTTP error: {e:?}"))?;
+        }
+        future_response.subscribe().block();
+    };
+
+    let status = incoming_resp.status();
+    let resp_body_handle = incoming_resp.consume().map_err(|_| "Failed to consume body".to_string())?;
+    let resp_stream = resp_body_handle.stream().map_err(|_| "Failed to get stream".to_string())?;
+
+    // Read response body
+    let mut resp_bytes = Vec::new();
+    loop {
+        match resp_stream.blocking_read(65536) {
+            Ok(chunk) => resp_bytes.extend_from_slice(&chunk),
+            Err(wasi::io::streams::StreamError::Closed) => break,
+            Err(e) => return Err(format!("Failed to read response: {e:?}")),
+        }
+    }
+
+    if status != 200 {
+        let err_text = String::from_utf8_lossy(&resp_bytes);
+        return Err(format!("Gemini API error ({}): {}", status, err_text));
+    }
+
+    let resp_json: serde_json::Value =
+        serde_json::from_slice(&resp_bytes).map_err(|e| e.to_string())?;
+
+    let text = resp_json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or("(No response)")
+        .to_string();
+
+    Ok(text)
+}
+
+/// Send a message to the Gemini API and get a response.
 #[server(prefix = "/api")]
 pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<String>> {
-    use antigravity_sdk_rust::agent::{Agent, AgentConfig};
-    use antigravity_sdk_rust::policy;
+    let api_key = std::env::var("GEMINI_API_KEY")
+        .map_err(|_| "GEMINI_API_KEY not set".to_string())?;
 
-    // Create a minimal agent with only read-only capabilities
-    let mut config = AgentConfig::default();
-    config.policies = Some(vec![policy::allow_all()]);
+    // Load chat history for context
+    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
+    let history: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages") {
+        Ok(Some(msgs)) => msgs,
+        _ => Vec::new(),
+    };
 
-    // Disable all write tools for safety in the web chat context
-    config.capabilities.enabled_tools = Some(vec![]);
+    // Build conversation contents array for Gemini
+    let mut contents = Vec::new();
+    for msg in &history {
+        let role = if msg.role == "user" { "user" } else { "model" };
+        contents.push(serde_json::json!({
+            "role": role,
+            "parts": [{ "text": msg.content }]
+        }));
+    }
+    // Add the new user message
+    contents.push(serde_json::json!({
+        "role": "user",
+        "parts": [{ "text": message }]
+    }));
 
-    let mut agent = Agent::new(config);
-    agent.start().await.map_err(|e| e.to_string())?;
+    let contents_value = serde_json::Value::Array(contents);
 
-    let response = agent.chat(&message).await.map_err(|e| e.to_string())?;
-
-    agent.stop().await.map_err(|e| e.to_string())?;
+    // Call Gemini synchronously (bypasses !Send issue)
+    let text = call_gemini(&api_key, &contents_value)?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -296,24 +412,18 @@ pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<
 
     let assistant_msg = ChatMessage {
         role: "assistant".to_string(),
-        content: response.text,
+        content: text,
         timestamp: now,
     };
 
     // Persist messages to KV store
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-
-    // Load existing messages
-    let mut messages: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages") {
-        Ok(Some(msgs)) => msgs,
-        _ => Vec::new(),
-    };
+    let mut messages = history;
 
     // Add user message
     messages.push(ChatMessage {
         role: "user".to_string(),
         content: message,
-        timestamp: now.saturating_sub(1), // Slightly before assistant
+        timestamp: now.saturating_sub(1),
     });
 
     // Add assistant message

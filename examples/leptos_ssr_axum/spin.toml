@@ -15,7 +15,7 @@ component = "leptos-ssr-axum"
 
 [component.leptos-ssr-axum]
 source = "target/wasm32-wasip1/release/leptos_ssr_axum.wasm"
-allowed_outbound_hosts = ["http://127.0.0.1:8000"]
+allowed_outbound_hosts = ["https://generativelanguage.googleapis.com"]
 key_value_stores = ["default"]
 environment = { GEMINI_API_KEY = "{{ gemini_api_key }}" }
 [component.leptos-ssr-axum.build]
