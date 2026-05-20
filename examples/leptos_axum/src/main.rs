@@ -77,7 +77,13 @@ async fn main() {
     let routes = generate_route_list(App);
 
     // 6. Build Axum router
+    // Serve static files from target/site (JS/WASM/CSS) before Leptos SSR routes
+    let site_root = leptos_options.site_root.clone();
     let app = Router::new()
+        .nest_service(
+            "/pkg",
+            tower_http::services::ServeDir::new(format!("{}/pkg", &site_root)),
+        )
         .leptos_routes_with_context(
             &leptos_options,
             routes,
