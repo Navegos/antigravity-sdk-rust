@@ -18,7 +18,8 @@ async fn test_agent_chat_integration() {
     let mut config = AgentConfig::default();
 
     // Set up mock harness path (absolute path to compiled Rust binary)
-    let harness_path = env!("CARGO_BIN_EXE_mock_localharness").to_string();
+    let harness_path = std::env::var("CARGO_BIN_EXE_mock_localharness")
+        .expect("CARGO_BIN_EXE_mock_localharness not set — run via `cargo test`");
 
     config.binary_path = Some(harness_path);
     config.gemini_config = GeminiConfig {
