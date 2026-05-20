@@ -124,7 +124,9 @@ impl Agent {
         let enabled_tools = self.config.capabilities.enabled_tools.clone();
         let disabled_tools = self.config.capabilities.disabled_tools.clone();
         if enabled_tools.is_some() && disabled_tools.is_some() {
-            return Err(anyhow!("enabled_tools and disabled_tools are mutually exclusive"));
+            return Err(anyhow!(
+                "enabled_tools and disabled_tools are mutually exclusive"
+            ));
         }
 
         let active_tools = enabled_tools.unwrap_or_else(|| {

@@ -398,7 +398,12 @@ pub enum StreamChunk {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::field_reassign_with_default)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::field_reassign_with_default
+    )]
     use super::*;
     use serde_json::json;
 
@@ -538,4 +543,3 @@ mod tests {
         assert!(config.compaction_threshold.is_none());
     }
 }
-

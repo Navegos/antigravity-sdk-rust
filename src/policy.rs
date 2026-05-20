@@ -71,13 +71,7 @@ pub fn allow(tool: &str) -> Policy {
 }
 
 pub fn deny(tool: &str) -> Policy {
-    Policy::new(
-        tool.to_string(),
-        Decision::Deny,
-        None,
-        None,
-        String::new(),
-    )
+    Policy::new(tool.to_string(), Decision::Deny, None, None, String::new())
 }
 
 pub fn ask_user(tool: &str, handler: impl Fn(&ToolCall) -> bool + Send + Sync + 'static) -> Policy {
@@ -246,7 +240,9 @@ impl Hook for PolicyEnforcer {
                 if let Some(ref when_fn) = p.when {
                     let when_fn = when_fn.clone();
                     let tc = tool_call.clone();
-                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || when_fn(&tc)));
+                    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                        when_fn(&tc)
+                    }));
                     match res {
                         Ok(true) => {}
                         Ok(false) => continue,
@@ -280,7 +276,10 @@ impl Hook for PolicyEnforcer {
                         if let Some(ref handler) = p.ask_user {
                             let handler = handler.clone();
                             let tc = tool_call.clone();
-                            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || handler(&tc)));
+                            let res =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                                    handler(&tc)
+                                }));
                             match res {
                                 Ok(true) => {
                                     return Ok(HookResult {
@@ -325,7 +324,12 @@ impl Hook for PolicyEnforcer {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unnecessary_map_or)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unnecessary_map_or
+    )]
     use super::*;
     use serde_json::json;
 
@@ -376,7 +380,10 @@ mod tests {
     #[test]
     fn test_deny_with_predicate() {
         let p = deny("run_command").when(|args| {
-            args.args.get("CommandLine").and_then(|v| v.as_str()).map_or(false, |s| s.contains("rm"))
+            args.args
+                .get("CommandLine")
+                .and_then(|v| v.as_str())
+                .map_or(false, |s| s.contains("rm"))
         });
         assert!(p.when.is_some());
     }
@@ -415,66 +422,78 @@ mod tests {
 
     #[tokio::test]
     async fn test_specific_deny_overrides_wildcard_allow() {
-        let enforcer = enforce(vec![
-            allow_all(),
-            deny("dangerous_tool"),
-        ]).unwrap();
-        let res = enforcer.pre_tool_call(&make_tool_call("dangerous_tool", json!({}))).await.unwrap();
+        let enforcer = enforce(vec![allow_all(), deny("dangerous_tool")]).unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("dangerous_tool", json!({})))
+            .await
+            .unwrap();
         assert!(!res.allow);
     }
 
     #[tokio::test]
     async fn test_specific_deny_overrides_specific_allow() {
-        let enforcer = enforce(vec![
-            allow("run_command"),
-            deny("run_command"),
-        ]).unwrap();
-        let res = enforcer.pre_tool_call(&make_tool_call("run_command", json!({}))).await.unwrap();
+        let enforcer = enforce(vec![allow("run_command"), deny("run_command")]).unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .await
+            .unwrap();
         assert!(!res.allow);
     }
 
     #[tokio::test]
     async fn test_specific_ask_overrides_wildcard_deny() {
-        let enforcer = enforce(vec![
-            deny_all(),
-            ask_user("run_command", |_| true),
-        ]).unwrap();
-        let res = enforcer.pre_tool_call(&make_tool_call("run_command", json!({}))).await.unwrap();
+        let enforcer = enforce(vec![deny_all(), ask_user("run_command", |_| true)]).unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .await
+            .unwrap();
         assert!(res.allow);
     }
 
     #[tokio::test]
     async fn test_specific_allow_overrides_wildcard_deny() {
-        let enforcer = enforce(vec![
-            deny_all(),
-            allow("read_file"),
-        ]).unwrap();
-        
-        let res = enforcer.pre_tool_call(&make_tool_call("read_file", json!({}))).await.unwrap();
+        let enforcer = enforce(vec![deny_all(), allow("read_file")]).unwrap();
+
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("read_file", json!({})))
+            .await
+            .unwrap();
         assert!(res.allow);
 
-        let res = enforcer.pre_tool_call(&make_tool_call("run_command", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .await
+            .unwrap();
         assert!(!res.allow);
     }
 
     #[tokio::test]
     async fn test_wildcard_deny_blocks_unmatched_tools() {
         let enforcer = enforce(vec![deny_all()]).unwrap();
-        let res = enforcer.pre_tool_call(&make_tool_call("anything", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("anything", json!({})))
+            .await
+            .unwrap();
         assert!(!res.allow);
     }
 
     #[tokio::test]
     async fn test_wildcard_ask_user() {
         let enforcer = enforce(vec![ask_user("*", |_| false)]).unwrap();
-        let res = enforcer.pre_tool_call(&make_tool_call("any_tool", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("any_tool", json!({})))
+            .await
+            .unwrap();
         assert!(!res.allow);
     }
 
     #[tokio::test]
     async fn test_wildcard_allow() {
         let enforcer = enforce(vec![allow_all()]).unwrap();
-        let res = enforcer.pre_tool_call(&make_tool_call("any_tool", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("any_tool", json!({})))
+            .await
+            .unwrap();
         assert!(res.allow);
     }
 
@@ -496,9 +515,13 @@ mod tests {
                     true
                 })
                 .with_name("second"),
-        ]).unwrap();
+        ])
+        .unwrap();
 
-        let res = enforcer.pre_tool_call(&make_tool_call("run_command", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .await
+            .unwrap();
         assert!(!res.allow);
         assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1);
     }
@@ -517,9 +540,13 @@ mod tests {
                 CALL_COUNT.fetch_add(1, Ordering::SeqCst);
                 true
             }),
-        ]).unwrap();
+        ])
+        .unwrap();
 
-        let res = enforcer.pre_tool_call(&make_tool_call("read_file", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("read_file", json!({})))
+            .await
+            .unwrap();
         assert!(res.allow);
         assert_eq!(CALL_COUNT.load(Ordering::SeqCst), 1);
     }
@@ -529,9 +556,13 @@ mod tests {
         let enforcer = enforce(vec![
             deny("run_command").when(|_| false).with_name("skip-me"),
             deny("run_command").when(|_| true).with_name("catch-me"),
-        ]).unwrap();
+        ])
+        .unwrap();
 
-        let res = enforcer.pre_tool_call(&make_tool_call("run_command", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .await
+            .unwrap();
         assert!(!res.allow);
         assert!(res.message.contains("catch-me"));
     }
@@ -544,9 +575,13 @@ mod tests {
                     panic!("boom");
                 })
                 .with_name("broken"),
-        ]).unwrap();
+        ])
+        .unwrap();
 
-        let res = enforcer.pre_tool_call(&make_tool_call("run_command", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .await
+            .unwrap();
         assert!(!res.allow);
         assert!(res.message.contains("broken"));
         assert!(res.message.contains("panicked"));
@@ -557,10 +592,15 @@ mod tests {
         let enforcer = enforce(vec![
             ask_user("run_command", |_| {
                 panic!("handler broke");
-            }).with_name("broken-ask"),
-        ]).unwrap();
+            })
+            .with_name("broken-ask"),
+        ])
+        .unwrap();
 
-        let res = enforcer.pre_tool_call(&make_tool_call("run_command", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("run_command", json!({})))
+            .await
+            .unwrap();
         assert!(!res.allow);
         assert!(res.message.contains("broken-ask"));
         assert!(res.message.contains("handler panicked"));
@@ -569,14 +609,20 @@ mod tests {
     #[tokio::test]
     async fn test_no_matching_policy_allows() {
         let enforcer = enforce(vec![deny("other_tool")]).unwrap();
-        let res = enforcer.pre_tool_call(&make_tool_call("unrelated_tool", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("unrelated_tool", json!({})))
+            .await
+            .unwrap();
         assert!(res.allow);
     }
 
     #[tokio::test]
     async fn test_empty_policies_allows_all() {
         let enforcer = enforce(vec![]).unwrap();
-        let res = enforcer.pre_tool_call(&make_tool_call("any_tool", json!({}))).await.unwrap();
+        let res = enforcer
+            .pre_tool_call(&make_tool_call("any_tool", json!({})))
+            .await
+            .unwrap();
         assert!(res.allow);
     }
 
@@ -585,7 +631,10 @@ mod tests {
         let policies = workspace_only(vec!["/allowed/workspace".to_string()]);
         let enforcer = enforce(policies).unwrap();
 
-        let tc1 = make_tool_call("VIEW_FILE", json!({"path": "/allowed/workspace/subdir/file.rs"}));
+        let tc1 = make_tool_call(
+            "VIEW_FILE",
+            json!({"path": "/allowed/workspace/subdir/file.rs"}),
+        );
         let res1 = enforcer.pre_tool_call(&tc1).await.unwrap();
         assert!(res1.allow);
 
@@ -594,4 +643,3 @@ mod tests {
         assert!(!res2.allow);
     }
 }
-

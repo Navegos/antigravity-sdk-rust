@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::field_reassign_with_default)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::field_reassign_with_default
+)]
 
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::policy;
@@ -96,4 +101,3 @@ async fn test_agent_start_mutually_exclusive_capabilities() {
     let err_msg = result.unwrap_err().to_string();
     assert!(err_msg.contains("mutually exclusive"));
 }
-

@@ -285,11 +285,11 @@ mod tests {
         clippy::manual_string_new
     )]
     use super::*;
-    use crate::types::{StepSource, StepTarget, StepType, ToolCall, QuestionHookResult};
+    use crate::types::{QuestionHookResult, StepSource, StepTarget, StepType, ToolCall};
     use async_trait::async_trait;
     use futures_util::StreamExt;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     struct MockConnection {
         id: String,
@@ -346,7 +346,11 @@ mod tests {
             Ok(())
         }
 
-        async fn send_tool_response(&self, _id: &str, _result: crate::types::ToolResult) -> Result<(), anyhow::Error> {
+        async fn send_tool_response(
+            &self,
+            _id: &str,
+            _result: crate::types::ToolResult,
+        ) -> Result<(), anyhow::Error> {
             Ok(())
         }
 
@@ -602,4 +606,3 @@ mod tests {
         assert_eq!(tool_calls.len(), 2);
     }
 }
-

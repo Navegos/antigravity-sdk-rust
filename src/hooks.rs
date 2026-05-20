@@ -149,9 +149,14 @@ impl HookRunner {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::field_reassign_with_default)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::field_reassign_with_default
+    )]
     use super::*;
-    use crate::types::{HookResult, ToolCall, ToolResult, QuestionHookResult};
+    use crate::types::{HookResult, QuestionHookResult, ToolCall, ToolResult};
     use std::sync::Mutex;
 
     struct TrackerHook {
@@ -162,12 +167,18 @@ mod tests {
     #[async_trait]
     impl Hook for TrackerHook {
         async fn on_session_start(&self) -> Result<(), anyhow::Error> {
-            self.calls.lock().unwrap().push(format!("{}:session_start", self.name));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:session_start", self.name));
             Ok(())
         }
 
         async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
-            self.calls.lock().unwrap().push(format!("{}:pre_turn", self.name));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:pre_turn", self.name));
             if self.name == "deny" {
                 Ok(HookResult {
                     allow: false,
@@ -182,7 +193,10 @@ mod tests {
         }
 
         async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
-            self.calls.lock().unwrap().push(format!("{}:pre_tool_call", self.name));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:pre_tool_call", self.name));
             if self.name == "deny" {
                 Ok(HookResult {
                     allow: false,
@@ -197,7 +211,10 @@ mod tests {
         }
 
         async fn post_tool_call(&self, _result: &ToolResult) -> Result<(), anyhow::Error> {
-            self.calls.lock().unwrap().push(format!("{}:post_tool_call", self.name));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:post_tool_call", self.name));
             Ok(())
         }
 
@@ -205,7 +222,10 @@ mod tests {
             &self,
             _error: &anyhow::Error,
         ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
-            self.calls.lock().unwrap().push(format!("{}:on_tool_error", self.name));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:on_tool_error", self.name));
             if self.name == "recover" {
                 Ok((
                     HookResult {
@@ -229,7 +249,10 @@ mod tests {
             &self,
             _questions: &[AskQuestionEntry],
         ) -> Result<Option<QuestionHookResult>, anyhow::Error> {
-            self.calls.lock().unwrap().push(format!("{}:on_interaction", self.name));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:on_interaction", self.name));
             if self.name == "answer" {
                 Ok(Some(QuestionHookResult {
                     responses: vec![],
@@ -245,8 +268,18 @@ mod tests {
     async fn test_dispatch_session_start() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runner = HookRunner::new();
-        runner.register(Arc::new(TrackerHook { name: "h1".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "h2".to_string(), calls: calls.clone() })).await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h2".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
 
         runner.dispatch_session_start().await.unwrap();
 
@@ -258,8 +291,18 @@ mod tests {
     async fn test_dispatch_pre_turn_allow() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runner = HookRunner::new();
-        runner.register(Arc::new(TrackerHook { name: "h1".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "h2".to_string(), calls: calls.clone() })).await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h2".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
 
         let res = runner.dispatch_pre_turn().await.unwrap();
         assert!(res.allow);
@@ -272,9 +315,24 @@ mod tests {
     async fn test_dispatch_pre_turn_deny_short_circuits() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runner = HookRunner::new();
-        runner.register(Arc::new(TrackerHook { name: "h1".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "deny".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "h2".to_string(), calls: calls.clone() })).await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "deny".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h2".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
 
         let res = runner.dispatch_pre_turn().await.unwrap();
         assert!(!res.allow);
@@ -288,9 +346,24 @@ mod tests {
     async fn test_dispatch_pre_tool_call_deny_short_circuits() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runner = HookRunner::new();
-        runner.register(Arc::new(TrackerHook { name: "h1".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "deny".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "h2".to_string(), calls: calls.clone() })).await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "deny".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h2".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
 
         let tool_call = ToolCall {
             id: "call_1".to_string(),
@@ -310,7 +383,12 @@ mod tests {
     async fn test_dispatch_post_tool_call() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runner = HookRunner::new();
-        runner.register(Arc::new(TrackerHook { name: "h1".to_string(), calls: calls.clone() })).await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
 
         let res = ToolResult {
             name: "tool_1".to_string(),
@@ -328,9 +406,24 @@ mod tests {
     async fn test_dispatch_on_tool_error_recovery_short_circuits() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runner = HookRunner::new();
-        runner.register(Arc::new(TrackerHook { name: "h1".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "recover".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "h2".to_string(), calls: calls.clone() })).await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "recover".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h2".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
 
         let err = anyhow::anyhow!("error occurred");
         let (res, val) = runner.dispatch_on_tool_error(&err).await.unwrap();
@@ -346,9 +439,24 @@ mod tests {
     async fn test_dispatch_interaction_short_circuits() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let runner = HookRunner::new();
-        runner.register(Arc::new(TrackerHook { name: "h1".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "answer".to_string(), calls: calls.clone() })).await;
-        runner.register(Arc::new(TrackerHook { name: "h2".to_string(), calls: calls.clone() })).await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h1".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "answer".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
+        runner
+            .register(Arc::new(TrackerHook {
+                name: "h2".to_string(),
+                calls: calls.clone(),
+            }))
+            .await;
 
         let entries = vec![];
         let res = runner.dispatch_interaction(&entries).await.unwrap();
@@ -358,4 +466,3 @@ mod tests {
         assert_eq!(recorded, vec!["h1:on_interaction", "answer:on_interaction"]);
     }
 }
-
