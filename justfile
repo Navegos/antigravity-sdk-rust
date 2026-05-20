@@ -17,3 +17,8 @@ version new_version="":
 # Publish the SDK manually to crates.io (runs check first)
 publish: check
     cargo publish
+
+# Start localharness on the host
+start-harness:
+    cargo run --bin start-harness
+

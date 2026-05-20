@@ -1,10 +1,10 @@
 # Rust build artifacts
 /target
-Cargo.lock.bg
+*.lock
 
 # Development / Local configuration
 .env
-.env*.local
+!.env.local
 *.localharness.bin
 
 # OS specific files
@@ -21,6 +21,6 @@ db.json
 .cargo/config.toml.local
 
 # Backup and temp files
-*.rs.bk
+*.rs.bak
 cargo-timing.html
 bin/
