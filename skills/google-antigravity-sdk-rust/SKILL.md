@@ -46,17 +46,29 @@ Use the links below to navigate specific topics and code configurations:
 
 ### Examples
 
-* **Hello World**: Basic single-turn execution.
-  See [hello_world.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/hello_world.md).
+* **Hello World**: Basic single-turn chat, streaming text and thoughts, and interactive loop.
+  See [hello_world.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/hello_world.md).
 * **Custom Tools**: Write custom stateful and stateless tools using the `Tool` trait.
-  See [custom_tools.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/custom_tools.md).
-* **Session Persistence**: Resume past execution sessions using a unique `conversation_id`.
-  See [persistence.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/persistence.md).
-* **Policies**: Lock workspace directories and filter command lines.
-  See [policies.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/policies.md).
-* **Streaming**: Render real-time text outputs, internal thoughts, and tool call alerts.
-  See [streaming.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/streaming.md).
-* **Structured Output**: Direct agents to reply strictly with JSON objects adhering to a JSON schema.
-  See [structured_output.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/structured_output.md).
+  See [custom_tool.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/custom_tool.md).
+* **Persona & System Instructions**: Guide the agent's identity, tone, and directives.
+  See [persona_config.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/persona_config.md).
+* **Multimodal Inputs/Outputs**: Configure image generation capabilities and understand input constraints.
+  See [multimodal.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/multimodal.md).
 * **Subagent Delegation**: Coordinate multi-agent tasks using subagents.
-  See [subagents.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/subagents.md).
+  See [subagents.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/subagents.md).
+* **Model Context Protocol (MCP)**: Integrate external MCP tools via global configuration files.
+  See [mcp_tools.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/mcp_tools.md).
+* **Triggers & Background Loops**: Implement background workers reacting to system events.
+  See [periodic_trigger.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/periodic_trigger.md).
+* **Lifecycle Hooks**: Hook callbacks into pre-turn, tool execute, and error handling events.
+  See [hooks.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/hooks.md).
+* **Session Persistence**: Resume past execution sessions using a unique `conversation_id`.
+  See [persistence.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/persistence.md).
+* **App Data Directory Override**: Override directory settings controlling log and artifact storage paths.
+  See [app_data_dir_override.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/app_data_dir_override.md).
+* **Structured Output**: Direct agents to reply strictly with JSON objects adhering to a JSON schema.
+  See [structured_output.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/structured_output.md).
+* **Agent Skills**: Dynamically load filesystem-based skill structures into the agent.
+  See [agent_skills.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/agent_skills.md).
+* **Policies**: Lock workspace directories and filter command lines.
+  See [policies.md](file:///Volumes/goldcoders/antigravity-sdk-rust/skills/google-antigravity-sdk-rust/examples/getting_started/policies.md).

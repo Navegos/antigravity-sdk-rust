@@ -47,7 +47,7 @@ gemini_config.models.default.generation.thinking_level = Some(ThinkingLevel::Hig
 Supports fully custom prompts or modular instructions appended to the system identity:
 
 ```rust
-use antigravity_sdk_rust::types::{SystemInstructions, CustomSystemInstructions, AppendedSystemInstructions, Section};
+use antigravity_sdk_rust::types::{SystemInstructions, CustomSystemInstructions, AppendedSystemInstructions, SystemInstructionSection};
 
 // Choice A: Full custom text
 let instructions = SystemInstructions::Custom(CustomSystemInstructions {
@@ -58,9 +58,9 @@ let instructions = SystemInstructions::Custom(CustomSystemInstructions {
 let instructions = SystemInstructions::Appended(AppendedSystemInstructions {
     custom_identity: Some("You are an SRE bot.".to_string()),
     appended_sections: vec![
-        Section {
-            title: Some("Formatting Guideline".to_string()),
-            content: Some("Always wrap commands in code blocks.".to_string()),
+        SystemInstructionSection {
+            title: "Formatting Guideline".to_string(),
+            content: "Always wrap commands in code blocks.".to_string(),
         }
     ],
 });

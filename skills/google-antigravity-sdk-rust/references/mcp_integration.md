@@ -15,13 +15,13 @@ use serde_json::Value;
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// The name of the tool exposed to the model (e.g. "my_custom_action").
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     /// A clear description explaining what the tool does and when the model should invoke it.
-    fn description(&self) -> &'static str;
+    fn description(&self) -> &str;
 
     /// A JSON Schema string specifying the parameters required by the tool.
-    fn parameters_json_schema(&self) -> &'static str;
+    fn parameters_json_schema(&self) -> &str;
 
     /// The asynchronous function executed when the model calls the tool.
     /// Receives arguments as a JSON `Value` and returns a JSON `Value` result.
@@ -47,15 +47,15 @@ struct HashStringTool;
 
 #[async_trait]
 impl Tool for HashStringTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "hash_string"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Computes the SHA-256 hash of a provided input text."
     }
 
-    fn parameters_json_schema(&self) -> &'static str {
+    fn parameters_json_schema(&self) -> &str {
         r#"{
             "type": "object",
             "properties": {

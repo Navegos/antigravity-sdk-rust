@@ -1,12 +1,10 @@
-# Session Persistence Example Walkthrough
+# Session Persistence Example
 
-This walkthrough demonstrates how to cache conversation states locally and resume a session across different agent lifecycles.
+This example walkthrough demonstrates how to cache conversation states locally and resume a session across different agent lifecycles.
 
-## Example Source Code
+## Code Example
 
-The full implementation is located in [examples/persistence.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/persistence.rs). 
-
-Key steps to achieve persistence:
+The full implementation is located in [examples/persistence.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/persistence.rs):
 
 ```rust
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};

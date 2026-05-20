@@ -1,12 +1,10 @@
-# Structured Output Example Walkthrough
+# Structured Output Example
 
-This walkthrough demonstrates how to configure the agent to respond strictly with valid JSON conforming to a specified JSON Schema.
+This example walkthrough demonstrates how to configure the agent to respond strictly with valid JSON conforming to a specified JSON Schema.
 
-## Example Source Code
+## Code Example
 
-The full implementation is located in [examples/structured_output.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/structured_output.rs).
-
-Key configuration segments:
+The full implementation is located in [examples/structured_output.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/structured_output.rs):
 
 ```rust
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};

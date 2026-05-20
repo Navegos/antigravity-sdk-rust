@@ -1,12 +1,10 @@
-# Safety Policies Example Walkthrough
+# Safety Policies Example
 
 This walkthrough illustrates how to build a robust policy layer to filter CLI commands and prompt before writing sensitive files.
 
-## Example Source Code
+## Code Example
 
-The full implementation is located in [examples/policies.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/policies.rs).
-
-Key segments of the policy setup:
+The full implementation is located in [examples/policies.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/policies.rs):
 
 ```rust
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};

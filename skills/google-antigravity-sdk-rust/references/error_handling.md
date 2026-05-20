@@ -30,9 +30,13 @@ pub trait Hook: Send + Sync {
         Ok(())
     }
 
-    /// Triggered before a model turn starts.
-    async fn pre_turn(&self, _prompt: &str) -> Result<(), anyhow::Error> {
-        Ok(())
+    /// Intercepts the start of a user turn before the LLM processes the prompt.
+    /// Returns `allow: false` to halt execution.
+    async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
+        Ok(HookResult {
+            allow: true,
+            message: String::new(),
+        })
     }
 
     /// Triggered before a tool execution. Returns a HookResult indicating whether to allow or block.
@@ -46,8 +50,18 @@ pub trait Hook: Send + Sync {
     }
 
     /// Triggered when a tool execution encounters an error.
-    async fn on_tool_error(&self, _error: &anyhow::Error) -> Result<(), anyhow::Error> {
-        Ok(())
+    /// Allows fallback logic or customized error payloads.
+    async fn on_tool_error(
+        &self,
+        error: &anyhow::Error,
+    ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
+        Ok((
+            HookResult {
+                allow: false,
+                message: error.to_string(),
+            },
+            None,
+        ))
     }
 
     /// Triggered when the agent prompts the user with interactive questions.
@@ -90,10 +104,19 @@ impl Hook for DiagnosticLogger {
         Ok(())
     }
 
-    async fn on_tool_error(&self, error: &anyhow::Error) -> Result<(), anyhow::Error> {
+    async fn on_tool_error(
+        &self,
+        error: &anyhow::Error,
+    ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
         eprintln!("[HOOK ERROR] Tool failed: {}", error);
         // Custom telemetry or recovery logic can go here
-        Ok(())
+        Ok((
+            HookResult {
+                allow: false,
+                message: error.to_string(),
+            },
+            None,
+        ))
     }
 }
 

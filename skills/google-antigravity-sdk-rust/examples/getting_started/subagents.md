@@ -1,12 +1,10 @@
-# Subagent Orchestration Example Walkthrough
+# Subagent Orchestration Example
 
-This walkthrough demonstrates how to authorize an agent to delegate tasks to subagents and monitor the subagent execution lifecycle using hooks.
+This example walkthrough demonstrates how to authorize an agent to delegate tasks to subagents and monitor the subagent execution lifecycle using hooks.
 
-## Example Source Code
+## Code Example
 
-The full implementation is located in [examples/subagents.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/subagents.rs).
-
-Core setup and subagent hooks:
+The complete implementation can be found in [examples/subagents.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/subagents.rs):
 
 ```rust
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};

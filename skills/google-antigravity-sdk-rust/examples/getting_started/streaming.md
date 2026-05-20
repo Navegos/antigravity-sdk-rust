@@ -1,12 +1,10 @@
-# Streaming Example Walkthrough
+# Streaming Responses
 
-This walkthrough demonstrates how to stream chat responses, distinguishing reasoning thought blocks from response text and tool execution notifications in real time.
+This example walkthrough demonstrates how to stream chat responses, distinguishing reasoning thought blocks from response text and tool execution notifications in real time.
 
-## Example Source Code
+## Code Example
 
-The full implementation is located in [examples/streaming.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/streaming.rs).
-
-Core streaming loop:
+The full implementation is located in [examples/streaming.rs](file:///Volumes/goldcoders/antigravity-sdk-rust/examples/streaming.rs):
 
 ```rust
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
