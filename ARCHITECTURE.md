@@ -11,12 +11,15 @@ The Antigravity SDK orchestrates interactions between an LLM-based agent (runnin
 ```mermaid
 graph TD
     A[Agent] --> B[Conversation]
-    A --> C[LocalConnection]
+    A --> C[LocalConnection / WasmConnection]
     A --> D[ToolRunner]
     A --> E[HookRunner]
+    A --> I[TriggerRunner]
     C -->|Subprocess IPC / WebSocket| F[localharness]
+    C -->|Network WebSocket| F
     D -->|Executes| G[Local Tools]
     E -->|Intercepts| H[User Hooks / Policies]
+    I -->|Spawns| J[Background Triggers]
 ```
 
 ---
@@ -25,9 +28,10 @@ graph TD
 
 The SDK leverages several object-oriented and functional design patterns:
 
-### 1. Connection & Strategy Pattern (`connection.rs`, `local.rs`)
-- **Connection Trait**: Defines an abstraction for communication. This allows swapping the local subprocess harness with other backends (e.g., remote or mock harnesses) in the future.
-- **LocalConnectionStrategy**: Acts as a builder/strategy to configure and initialize a `LocalConnection`.
+### 1. Connection & Strategy Pattern (`connection.rs`, `local.rs`, `wasm.rs`)
+- **Connection Trait**: Defines an abstraction for communication. This allows swapping the local subprocess harness with other backends (e.g., remote, mock, or WASM-based network harnesses) in the future.
+- **LocalConnectionStrategy**: Configures and initializes a `LocalConnection` by spawning a local helper subprocess (for native / non-WASM environments).
+- **WasmConnectionStrategy**: Configures and initializes a `WasmConnection` that connects to a remote or host-side `localharness` WebSocket server over TCP (enabled for `target_arch = "wasm32"` environments where subprocess spawning is not supported).
 
 ### 2. Observer Pattern (`hooks.rs`)
 - **Hook Trait**: Defines lifecycle hooks that users can register to observe and modify agent actions:
@@ -49,13 +53,20 @@ The SDK leverages several object-oriented and functional design patterns:
 - **Tool Trait**: Encapsulates specific capabilities (e.g., file edits, command execution, directory searching) into unified command units.
 - **ToolRunner**: Coordinates registration and execution of these command objects, mapping harness tool calls to their respective handlers.
 
+### 5. Background Trigger Pattern (`triggers.rs`)
+- **Trigger Trait**: Defines asynchronous background tasks (such as status polling, listener intervals, etc.) that can interact with the connection session concurrently.
+- **TriggerRunner**: Coordinates and spawns registered triggers in separate tasks when the agent session starts.
+
+### 6. Direct Gemini Client (`direct.rs`)
+- **GeminiDirectClient**: A transport-agnostic client that constructs REST request payloads and parses responses directly from the Gemini API. Bypasses the `localharness` and WebSocket loop entirely. It is helpful for environments where TCP/WebSocket or spawning subprocesses is not possible (e.g. lightweight WASI components).
+
 ---
 
 ## Component Details
 
-### Connection Lifecycle
+### Connection Lifecycle (Native Subprocess)
 
-The connection to `localharness` follows a strict handshake and upgrade protocol:
+The connection to `localharness` via subprocess follows a strict handshake and upgrade protocol:
 
 ```mermaid
 sequenceDiagram
@@ -78,6 +89,21 @@ sequenceDiagram
 2. **Handshake**: The SDK sends an `InputConfig` (serialized protocol buffer, prefixed by its length in bytes) over stdin. The harness replies with an `OutputConfig` containing the dynamically selected port and a secure API key.
 3. **Upgrade**: The SDK initiates a WebSocket client connection to the harness server using the retrieved port and API key, upgrading communication to a structured bi-directional stream.
 4. **Disconnection**: When dropped, the subprocess is killed cleanly.
+
+### Connection Lifecycle (WebAssembly Network Target)
+
+For WebAssembly targets (`wasm32-wasip1`), the SDK connects to a running host-side harness over the network rather than spawning a subprocess:
+
+```mermaid
+sequenceDiagram
+    participant SDK as WASM Rust SDK
+    participant Host as Host Machine (localharness)
+
+    SDK->>Host: Open TCP Connection & Upgrade to WebSocket (with API Key)
+    Host->>SDK: Handshake Completed
+    SDK->>Host: Send InitializeConversationEvent (HarnessConfig)
+    Note over SDK,Host: Step execution loop active
+```
 
 ---
 
