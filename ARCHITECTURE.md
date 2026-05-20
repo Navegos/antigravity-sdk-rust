@@ -56,6 +56,17 @@ The SDK leverages several object-oriented and functional design patterns:
 ### 5. Background Trigger Pattern (`triggers.rs`)
 - **Trigger Trait**: Defines asynchronous background tasks (such as status polling, listener intervals, etc.) that can interact with the connection session concurrently.
 - **TriggerRunner**: Coordinates and spawns registered triggers in separate tasks when the agent session starts.
+
+### 6. Typestate Pattern (`agent.rs`)
+- Enforces at compile-time that session-level actions (e.g., calling `chat()`, calling `stop()`, or accessing the active `conversation()`) can only be performed after the agent has been successfully started.
+- The `Agent<S>` struct is generic over a marker lifecycle type `S: AgentLifecycle` which can be `Unstarted` or `Started`.
+- Calling `agent.start().await` consumes the `Agent<Unstarted>` instance and returns a Result holding an `Agent<Started>` instance upon a successful handshake.
+
+### 7. Builder Pattern with Phantom Data (`agent.rs`)
+- The `AgentBuilder` provides a fluent configuration API.
+- Leverages compile-time phantom data state (`NoPolicies` vs `HasPolicies`) to guarantee that safety policies must be explicitly configured or bypassed before an agent can be constructed via `build()`.
+- An escape hatch `build_unchecked()` is provided for advanced scenarios (e.g., during programmatic test setup).
+
 ---
 
 ## Component Details

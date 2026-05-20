@@ -1,9 +1,7 @@
 #[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() {
-    use antigravity_sdk_rust::agent::{Agent, AgentConfig};
-    use antigravity_sdk_rust::policy;
-    use antigravity_sdk_rust::types::GeminiConfig;
+    use antigravity_sdk_rust::agent::Agent;
     use axum::Router;
     use leptos::prelude::*;
     use leptos_axum::{generate_route_list, LeptosRoutes};
@@ -26,48 +24,46 @@ async fn main() {
     let addr = leptos_options.site_addr;
 
     // 4. Initialize the antigravity-sdk-rust Agent
-    let mut agent_config = AgentConfig::default();
+    let harness_path = std::env::var("ANTIGRAVITY_HARNESS_PATH").ok();
+    let api_key = std::env::var("GEMINI_API_KEY").ok();
 
-    // Configure Gemini
-    let mut gemini_config = GeminiConfig::default();
-    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        gemini_config.api_key = Some(api_key);
+    let mut builder = Agent::builder();
+    if let Some(path) = harness_path {
+        builder = builder.binary_path(path);
     }
-    gemini_config.models.default.name = "gemini-3.5-flash".to_string();
-    agent_config.gemini_config = gemini_config;
+    if let Some(key) = api_key {
+        builder = builder.api_key(key);
+    }
 
-    // Set policies — allow all for this demo
-    agent_config.policies = Some(vec![policy::allow_all()]);
-
-    // Set custom system instructions for chat behavior
-    agent_config.system_instructions =
-        Some(antigravity_sdk_rust::types::SystemInstructions::Custom(
+    let agent = builder
+        .default_model("gemini-3.5-flash")
+        .allow_all()
+        .system_instructions(antigravity_sdk_rust::types::SystemInstructions::Custom(
             antigravity_sdk_rust::types::CustomSystemInstructions {
                 text: "You are a helpful AI assistant in a chat interface. \
                        Keep responses concise and conversational. \
                        Use markdown formatting when helpful."
                     .to_string(),
             },
-        ));
+        ))
+        .capabilities(antigravity_sdk_rust::types::CapabilitiesConfig {
+            enabled_tools: Some(vec![]),
+            disabled_tools: None,
+            compaction_threshold: None,
+            image_model: None,
+            finish_tool_schema_json: None,
+        })
+        .build();
 
-    // Check for harness binary path
-    if let Ok(harness_path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
-        agent_config.binary_path = Some(harness_path);
-    }
-
-    // Disable all file/command tools — this is a chat-only example
-    agent_config.capabilities.enabled_tools = Some(vec![]);
-
-    let mut agent = Agent::new(agent_config);
     tracing::info!("Starting antigravity-sdk-rust Agent...");
-    agent
+    let agent = agent
         .start()
         .await
         .expect("Failed to start Agent. Is localharness installed?");
     tracing::info!("Agent started successfully");
 
     // Wrap agent in shared state
-    let agent_state: leptos_axum_chat::AgentState = Arc::new(Mutex::new(agent));
+    let agent_state: leptos_axum_chat::AgentState = Arc::new(agent);
 
     // Also keep chat history in memory for this session
     let chat_history: leptos_axum_chat::ChatHistoryState =

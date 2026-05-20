@@ -579,13 +579,10 @@ pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<
     }
 
     // Call the Agent using the SDK!
-    let response = {
-        let agent = agent_state.lock().await;
-        agent
-            .chat(&message)
-            .await
-            .map_err(|e| format!("Agent error: {e}"))?
-    };
+    let response = agent_state
+        .chat(&message)
+        .await
+        .map_err(|e| format!("Agent error: {e}"))?;
 
     // Build assistant message
     let assistant_msg = ChatMessage {

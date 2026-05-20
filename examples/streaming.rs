@@ -1,6 +1,5 @@
-use antigravity_sdk_rust::agent::{Agent, AgentConfig};
-use antigravity_sdk_rust::policy;
-use antigravity_sdk_rust::types::{GeminiConfig, StreamChunk};
+use antigravity_sdk_rust::agent::Agent;
+use antigravity_sdk_rust::types::StreamChunk;
 use futures_util::StreamExt;
 use tracing_subscriber::EnvFilter;
 
@@ -14,29 +13,29 @@ async fn main() -> Result<(), anyhow::Error> {
     // Load environment variables from .env file if present
     dotenvy::dotenv().ok();
 
-    let mut config = AgentConfig::default();
+    let harness_path = std::env::var("ANTIGRAVITY_HARNESS_PATH").ok();
+    let api_key = std::env::var("GEMINI_API_KEY").ok();
 
-    if let Ok(harness_path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
-        config.binary_path = Some(harness_path);
+    let mut builder = Agent::builder();
+    if let Some(path) = harness_path {
+        builder = builder.binary_path(path);
+    }
+    if let Some(key) = api_key {
+        builder = builder.api_key(key);
     }
 
-    let mut gemini_config = GeminiConfig::default();
-    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        gemini_config.api_key = Some(api_key);
-    }
-    gemini_config.models.default.name = "gemini-3.5-flash".to_string();
-    config.gemini_config = gemini_config;
+    let agent = builder
+        .default_model("gemini-3.5-flash")
+        .allow_all()
+        .build();
 
-    config.policies = Some(vec![policy::allow_all()]);
-
-    let mut agent = Agent::new(config);
     println!("Starting agent...");
-    agent.start().await?;
+    let agent = agent.start().await?;
 
     let prompt = "Solve this riddle: I speak without a mouth and hear without ears. I have no body, but I come alive with wind. What am I? Explain your reasoning.";
     println!("\n  User: {}\n", prompt);
 
-    let conversation = agent.conversation()?;
+    let conversation = agent.conversation();
     let mut stream = conversation.chat(prompt).await?;
 
     println!("  Agent (Streaming response):");

@@ -1,7 +1,6 @@
-use antigravity_sdk_rust::agent::{Agent, AgentConfig};
+use antigravity_sdk_rust::agent::Agent;
 use antigravity_sdk_rust::policy;
 use antigravity_sdk_rust::tools::Tool;
-use antigravity_sdk_rust::types::GeminiConfig;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -117,49 +116,45 @@ async fn main() -> Result<(), anyhow::Error> {
     // Load environment variables from .env file if present
     dotenvy::dotenv().ok();
 
-    let mut config = AgentConfig::default();
+    // Check if the user specified a binary path or check the environment variable
+    let harness_path = std::env::var("ANTIGRAVITY_HARNESS_PATH").ok();
+    let api_key = std::env::var("GEMINI_API_KEY").ok();
 
-    if let Ok(harness_path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
-        config.binary_path = Some(harness_path);
+    let mut builder = Agent::builder();
+    if let Some(path) = harness_path {
+        builder = builder.binary_path(path);
     }
-
-    let mut gemini_config = GeminiConfig::default();
-    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        gemini_config.api_key = Some(api_key);
+    if let Some(key) = api_key {
+        builder = builder.api_key(key);
     }
-    gemini_config.models.default.name = "gemini-3.5-flash".to_string();
-    config.gemini_config = gemini_config;
-
-    config.system_instructions = Some(antigravity_sdk_rust::types::SystemInstructions::Custom(
-        antigravity_sdk_rust::types::CustomSystemInstructions {
-            text:
-                "You keep track of fruit inventory. To record fruits, you MUST first look up the \
-                   fruit's SKU using lookup_fruit_sku, and then use that SKU with record_fruit."
-                    .to_string(),
-        },
-    ));
 
     // Initialize shared mutable state for stateful tool
     let inventory = Arc::new(Mutex::new(HashMap::new()));
 
-    // Register our custom tools
-    config.tools = vec![
-        Arc::new(LookupSkuTool),
-        Arc::new(RecordFruitTool {
-            inventory: inventory.clone(),
-        }),
-    ];
+    let agent = builder
+        .default_model("gemini-3.5-flash")
+        .system_instructions(antigravity_sdk_rust::types::SystemInstructions::Custom(
+            antigravity_sdk_rust::types::CustomSystemInstructions {
+                text: "You keep track of fruit inventory. To record fruits, you MUST first look up the \
+                       fruit's SKU using lookup_fruit_sku, and then use that SKU with record_fruit."
+                        .to_string(),
+            },
+        ))
+        .tools(vec![
+            Arc::new(LookupSkuTool),
+            Arc::new(RecordFruitTool {
+                inventory: inventory.clone(),
+            }),
+        ])
+        .policies(vec![
+            policy::deny_all(),
+            policy::allow("lookup_fruit_sku"),
+            policy::allow("record_fruit"),
+        ])
+        .build();
 
-    // Restrict agent to ONLY these tools
-    config.policies = Some(vec![
-        policy::deny_all(),
-        policy::allow("lookup_fruit_sku"),
-        policy::allow("record_fruit"),
-    ]);
-
-    let mut agent = Agent::new(config);
     println!("Starting agent...");
-    agent.start().await?;
+    let agent = agent.start().await?;
 
     println!("  === Custom Tools Demo ===");
 

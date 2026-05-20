@@ -1,6 +1,6 @@
-use antigravity_sdk_rust::agent::{Agent, AgentConfig};
+use antigravity_sdk_rust::agent::Agent;
 use antigravity_sdk_rust::policy::{self, Decision, Policy};
-use antigravity_sdk_rust::types::{GeminiConfig, ToolCall};
+use antigravity_sdk_rust::types::ToolCall;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -48,50 +48,46 @@ async fn main() -> Result<(), anyhow::Error> {
     // Load environment variables from .env file if present
     dotenvy::dotenv().ok();
 
-    let mut config = AgentConfig::default();
+    let harness_path = std::env::var("ANTIGRAVITY_HARNESS_PATH").ok();
+    let api_key = std::env::var("GEMINI_API_KEY").ok();
 
-    if let Ok(harness_path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
-        config.binary_path = Some(harness_path);
+    let mut builder = Agent::builder();
+    if let Some(path) = harness_path {
+        builder = builder.binary_path(path);
+    }
+    if let Some(key) = api_key {
+        builder = builder.api_key(key);
     }
 
-    let mut gemini_config = GeminiConfig::default();
-    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        gemini_config.api_key = Some(api_key);
-    }
-    gemini_config.models.default.name = "gemini-3.5-flash".to_string();
-    config.gemini_config = gemini_config;
-
-    // Configure policies using the recommended "Deny by Default" posture.
-    let policies = vec![
+    let agent = builder
+        .default_model("gemini-3.5-flash")
         // 1. Deny everything by default
-        policy::deny_all(),
+        .policy(policy::deny_all())
         // 2. Allow listing directories
-        policy::allow("LIST_DIR"),
+        .policy(policy::allow("LIST_DIR"))
         // 3. Allow running commands, but block dangerous 'rm' commands
-        Policy::new(
+        .policy(Policy::new(
             "RUN_COMMAND".to_string(),
             Decision::Deny,
             Some(Arc::new(block_rm_predicate)),
             None,
             "block-rm".to_string(),
-        ),
+        ))
         // Fallback: Allow general RUN_COMMAND calls if they don't match the rm block predicate
-        policy::allow("RUN_COMMAND"),
+        .policy(policy::allow("RUN_COMMAND"))
         // 4. Allow editing/creating files, but ask the user first if it's a critical file
-        Policy::new(
+        .policy(Policy::new(
             "WRITE_TO_FILE".to_string(),
             Decision::AskUser,
             Some(Arc::new(critical_file_predicate)),
             Some(Arc::new(programmatic_approval_handler)),
             "ask-for-critical-writes".to_string(),
-        ),
-        policy::allow("WRITE_TO_FILE"),
-    ];
-    config.policies = Some(policies);
+        ))
+        .policy(policy::allow("WRITE_TO_FILE"))
+        .build();
 
-    let mut agent = Agent::new(config);
     println!("Starting agent...");
-    agent.start().await?;
+    let agent = agent.start().await?;
 
     println!("\n  Chatting with agent...");
 

@@ -1,8 +1,7 @@
-use antigravity_sdk_rust::agent::{Agent, AgentConfig};
+use antigravity_sdk_rust::agent::Agent;
 use antigravity_sdk_rust::hooks::Hook;
-use antigravity_sdk_rust::policy;
 use antigravity_sdk_rust::types::{
-    BuiltinTools, CapabilitiesConfig, GeminiConfig, HookResult, ToolCall, ToolResult,
+    BuiltinTools, CapabilitiesConfig, HookResult, ToolCall, ToolResult,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,18 +66,16 @@ async fn main() -> Result<(), anyhow::Error> {
     // Load environment variables from .env file if present
     dotenvy::dotenv().ok();
 
-    let mut config = AgentConfig::default();
+    let harness_path = std::env::var("ANTIGRAVITY_HARNESS_PATH").ok();
+    let api_key = std::env::var("GEMINI_API_KEY").ok();
 
-    if let Ok(harness_path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
-        config.binary_path = Some(harness_path);
+    let mut builder = Agent::builder();
+    if let Some(path) = harness_path {
+        builder = builder.binary_path(path);
     }
-
-    let mut gemini_config = GeminiConfig::default();
-    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        gemini_config.api_key = Some(api_key);
+    if let Some(key) = api_key {
+        builder = builder.api_key(key);
     }
-    gemini_config.models.default.name = "gemini-3.5-flash".to_string();
-    config.gemini_config = gemini_config;
 
     // Enable subagents capability and file viewing
     let capabilities = CapabilitiesConfig {
@@ -90,20 +87,18 @@ async fn main() -> Result<(), anyhow::Error> {
         ]),
         ..Default::default()
     };
-    config.capabilities = capabilities;
 
-    // Add Hook for visibility
     let subagent_active = Arc::new(AtomicBool::new(false));
-    config
-        .hooks
-        .push(Arc::new(SubagentHook { subagent_active }));
 
-    // Allow tools
-    config.policies = Some(vec![policy::allow_all()]);
+    let agent = builder
+        .default_model("gemini-3.5-flash")
+        .capabilities(capabilities)
+        .hook(Arc::new(SubagentHook { subagent_active }))
+        .allow_all()
+        .build();
 
-    let mut agent = Agent::new(config);
     println!("Starting agent...");
-    agent.start().await?;
+    let agent = agent.start().await?;
 
     let prompt = "Use a subagent to research the files in the current directory. \
                   Delegate the task of listing the directory to the subagent, and then \

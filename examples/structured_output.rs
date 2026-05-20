@@ -1,7 +1,6 @@
-use antigravity_sdk_rust::agent::{Agent, AgentConfig};
+use antigravity_sdk_rust::agent::Agent;
 use antigravity_sdk_rust::policy;
 use antigravity_sdk_rust::tools::Tool;
-use antigravity_sdk_rust::types::GeminiConfig;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
@@ -58,18 +57,16 @@ async fn main() -> Result<(), anyhow::Error> {
     // Load environment variables from .env file if present
     dotenvy::dotenv().ok();
 
-    let mut config = AgentConfig::default();
+    let harness_path = std::env::var("ANTIGRAVITY_HARNESS_PATH").ok();
+    let api_key = std::env::var("GEMINI_API_KEY").ok();
 
-    if let Ok(harness_path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
-        config.binary_path = Some(harness_path);
+    let mut builder = Agent::builder();
+    if let Some(path) = harness_path {
+        builder = builder.binary_path(path);
     }
-
-    let mut gemini_config = GeminiConfig::default();
-    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        gemini_config.api_key = Some(api_key);
+    if let Some(key) = api_key {
+        builder = builder.api_key(key);
     }
-    gemini_config.models.default.name = "gemini-3.5-flash".to_string();
-    config.gemini_config = gemini_config;
 
     // Define response schema for meeting summaries and action items
     let response_schema = r#"{
@@ -90,20 +87,17 @@ async fn main() -> Result<(), anyhow::Error> {
         },
         "required": ["action_items"]
     }"#;
-    config.response_schema = Some(response_schema.to_string());
 
-    // Register our custom tool
-    config.tools = vec![Arc::new(FetchNotesTool)];
+    let agent = builder
+        .default_model("gemini-3.5-flash")
+        .response_schema(response_schema.to_string())
+        .tool(Arc::new(FetchNotesTool))
+        .policy(policy::deny_all())
+        .policy(policy::allow("fetch_unstructured_meeting_notes"))
+        .build();
 
-    // Allow our tool and standard tools
-    config.policies = Some(vec![
-        policy::deny_all(),
-        policy::allow("fetch_unstructured_meeting_notes"),
-    ]);
-
-    let mut agent = Agent::new(config);
     println!("Starting agent...");
-    agent.start().await?;
+    let agent = agent.start().await?;
 
     let prompt = "Use the fetch_unstructured_meeting_notes tool to retrieve notes for \
                   'meeting-2026-05' and return the meeting summary with the appropriate \

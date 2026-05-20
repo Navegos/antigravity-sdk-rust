@@ -4,15 +4,13 @@ pub mod app;
 pub mod types;
 
 #[cfg(feature = "ssr")]
-use antigravity_sdk_rust::agent::Agent;
+use antigravity_sdk_rust::agent::{Agent, Started};
 #[cfg(feature = "ssr")]
 use std::sync::Arc;
-#[cfg(feature = "ssr")]
-use tokio::sync::Mutex;
 
 /// Shared Agent state accessible from server functions via Leptos context.
 #[cfg(feature = "ssr")]
-pub type AgentState = Arc<Mutex<Agent>>;
+pub type AgentState = Arc<Agent<Started>>;
 
 /// In-memory chat history for the current session.
 #[cfg(feature = "ssr")]

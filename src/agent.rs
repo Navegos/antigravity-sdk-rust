@@ -9,6 +9,7 @@ use crate::types::{
     BuiltinTools, CapabilitiesConfig, ChatResponse, GeminiConfig, SystemInstructions,
 };
 use anyhow::anyhow;
+use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
 /// Configuration settings used to customize the behavior and capabilities of an [`Agent`].
@@ -74,85 +75,95 @@ impl std::fmt::Debug for AgentConfig {
 /// # Examples
 ///
 /// ```no_run
-/// use antigravity_sdk_rust::agent::{Agent, AgentConfig};
-/// use antigravity_sdk_rust::policy;
+/// use antigravity_sdk_rust::agent::Agent;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), anyhow::Error> {
-///     let mut config = AgentConfig::default();
-///     config.policies = Some(vec![policy::allow_all()]);
-///
-///     let mut agent = Agent::new(config);
-///     agent.start().await?;
+///     let agent = Agent::builder()
+///         .allow_all()
+///         .build();
+///     let agent = agent.start().await?;
 ///
 ///     let response = agent.chat("What is 2+2?").await?;
 ///     println!("Agent: {}", response.text);
 ///
-///     agent.stop().await?;
+///     let _ = agent.stop().await;
 ///     Ok(())
 /// }
 /// ```
-pub struct Agent {
-    config: AgentConfig,
-    conversation: Option<Arc<Conversation>>,
-    tool_runner: ToolRunner,
-    hook_runner: HookRunner,
-    trigger_runner: Option<TriggerRunner>,
+/// Marker trait for all valid agent lifecycles.
+pub trait AgentLifecycle: Send + Sync + std::fmt::Debug {}
+
+/// Represents an agent that has been configured but not yet started.
+#[derive(Debug)]
+pub struct Unstarted;
+impl AgentLifecycle for Unstarted {}
+
+/// Represents an active, running agent session.
+pub struct Started {
+    pub(crate) conversation: Arc<Conversation>,
+    pub(crate) trigger_runner: Option<TriggerRunner>,
 }
 
-impl std::fmt::Debug for Agent {
+impl AgentLifecycle for Started {}
+
+impl std::fmt::Debug for Started {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Agent")
-            .field("config", &self.config)
+        f.debug_struct("Started")
             .field("conversation", &self.conversation)
-            .field("tool_runner", &self.tool_runner)
-            .field("hook_runner", &self.hook_runner)
             .field("trigger_runner", &self.trigger_runner)
             .finish()
     }
 }
 
-impl Agent {
+pub struct Agent<S: AgentLifecycle = Unstarted> {
+    config: AgentConfig,
+    tool_runner: ToolRunner,
+    hook_runner: HookRunner,
+    state: S,
+}
+
+impl<S: AgentLifecycle> std::fmt::Debug for Agent<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Agent")
+            .field("config", &self.config)
+            .field("tool_runner", &self.tool_runner)
+            .field("hook_runner", &self.hook_runner)
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl Agent<Unstarted> {
     /// Creates a new `Agent` with the given configuration.
     pub fn new(config: AgentConfig) -> Self {
         Self {
             config,
-            conversation: None,
             tool_runner: ToolRunner::new(),
             hook_runner: HookRunner::new(),
-            trigger_runner: None,
+            state: Unstarted,
         }
     }
 
-    /// Registers a custom lifecycle hook. Hooks can observe or modify agent transitions.
-    pub fn register_hook(&self, hook: Arc<dyn DynHook>) {
-        let hr = self.hook_runner.clone();
-        crate::spawn_task(async move {
-            hr.register(hook).await;
-        });
+    /// Returns an `AgentBuilder` to configure and construct an `Agent`.
+    pub fn builder() -> AgentBuilder<NoPolicies> {
+        AgentBuilder::new()
     }
 
-    /// Registers a custom background trigger. Triggers must be registered *before* the agent starts.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the agent session has already been started.
+    /// Registers a custom lifecycle hook during configuration.
+    pub fn register_hook(&mut self, hook: Arc<dyn DynHook>) {
+        self.config.hooks.push(hook);
+    }
+
+    /// Registers a custom background trigger.
     pub fn register_trigger(&mut self, trigger: Arc<dyn DynTrigger>) -> Result<(), anyhow::Error> {
-        if self.conversation.is_some() {
-            return Err(anyhow!(
-                "Cannot register triggers after the agent has started."
-            ));
-        }
         self.config.triggers.push(trigger);
         Ok(())
     }
 
-    /// Registers a custom tool available for execution by the agent.
-    pub fn register_tool(&self, tool: Arc<dyn DynTool>) {
-        let tr = self.tool_runner.clone();
-        crate::spawn_task(async move {
-            tr.register(tool).await;
-        });
+    /// Registers a custom tool during configuration.
+    pub fn register_tool(&mut self, tool: Arc<dyn DynTool>) {
+        self.config.tools.push(tool);
     }
 
     /// Spawns the subprocess communication harness, initializes safety policies, registers tools/hooks,
@@ -165,214 +176,222 @@ impl Agent {
     /// - Write tools are enabled but no safety policies are configured.
     /// - The WebSocket upgrade or subprocess connection fails.
     #[allow(clippy::too_many_lines)]
-    pub async fn start(&mut self) -> Result<(), anyhow::Error> {
-        if self.conversation.is_some() {
-            return Ok(());
-        }
-
-        // 1. Resolve binary path
-        #[cfg(not(target_arch = "wasm32"))]
+    pub fn start(self) -> BoxFuture<'static, Result<Agent<Started>, anyhow::Error>> {
+        Box::pin(async move {
+            // 1. Resolve binary path
+            #[cfg(not(target_arch = "wasm32"))]
         let binary_path = self.config.binary_path.clone()
             .or_else(get_default_binary_path)
             .ok_or_else(|| anyhow!("Could not find default localharness binary. Please specify binary_path explicitly."))?;
 
-        // 2. Setup hook runner and register pending hooks
-        for hook in &self.config.hooks {
-            self.hook_runner.register(hook.clone()).await;
-        }
-
-        // 3. Process capabilities and active tools
-        let enabled_tools = self.config.capabilities.enabled_tools.clone();
-        let disabled_tools = self.config.capabilities.disabled_tools.clone();
-        if enabled_tools.is_some() && disabled_tools.is_some() {
-            return Err(anyhow!(
-                "enabled_tools and disabled_tools are mutually exclusive"
-            ));
-        }
-
-        let active_tools = enabled_tools.unwrap_or_else(|| {
-            disabled_tools.map_or_else(
-                || {
-                    vec![
-                        BuiltinTools::CreateFile,
-                        BuiltinTools::EditFile,
-                        BuiltinTools::FindFile,
-                        BuiltinTools::ListDir,
-                        BuiltinTools::RunCommand,
-                        BuiltinTools::SearchDir,
-                        BuiltinTools::ViewFile,
-                        BuiltinTools::StartSubagent,
-                        BuiltinTools::GenerateImage,
-                        BuiltinTools::Finish,
-                    ]
-                },
-                |disabled| {
-                    let all = vec![
-                        BuiltinTools::CreateFile,
-                        BuiltinTools::EditFile,
-                        BuiltinTools::FindFile,
-                        BuiltinTools::ListDir,
-                        BuiltinTools::RunCommand,
-                        BuiltinTools::SearchDir,
-                        BuiltinTools::ViewFile,
-                        BuiltinTools::StartSubagent,
-                        BuiltinTools::GenerateImage,
-                        BuiltinTools::Finish,
-                    ];
-                    all.into_iter().filter(|t| !disabled.contains(t)).collect()
-                },
-            )
-        });
-
-        let read_only = BuiltinTools::read_only();
-        let has_write_tools = active_tools.iter().any(|t| !read_only.contains(t));
-
-        // 4. Set up policies
-        let mut final_policies = self.config.policies.clone().unwrap_or_else(|| {
-            // Default to confirm_run_command
-            policy::confirm_run_command(None)
-        });
-
-        // Prepend workspace scoping policies if workspaces are configured
-        let workspaces = self.config.workspaces.clone().unwrap_or_else(|| {
-            std::env::current_dir().map_or_else(
-                |_| Vec::new(),
-                |cwd| vec![cwd.to_string_lossy().into_owned()],
-            )
-        });
-
-        if !workspaces.is_empty() {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let app_data_dir = self
-                .config
-                .app_data_dir
-                .clone()
-                .unwrap_or_else(|| format!("{home}/.gemini/antigravity"));
-            let mut allowed_paths = workspaces;
-            allowed_paths.push(app_data_dir);
-            let mut ws_policies = policy::workspace_only(allowed_paths);
-            ws_policies.append(&mut final_policies);
-            final_policies = ws_policies;
-        }
-
-        // Safety policy check: if write tools are enabled, policies cannot be empty
-        if has_write_tools && final_policies.is_empty() {
-            return Err(anyhow!(
-                "Write tools are enabled without a safety policy. Add policies=[policy.allow_all()] to approve all tool calls, or policies=[policy.deny_all(), policy.allow(\"tool_name\")] to selectively allow specific tools."
-            ));
-        }
-
-        if !final_policies.is_empty() {
-            let enforcer = Arc::new(PolicyEnforcer::new(final_policies));
-            self.hook_runner.register(enforcer).await;
-        }
-
-        // 5. Register configured tools
-        for tool in &self.config.tools {
-            self.tool_runner.register(tool.clone()).await;
-        }
-
-        // 6. Build and connect strategy
-        #[cfg(target_arch = "wasm32")]
-        {
-            let mut cap = self.config.capabilities.clone();
-            if let Some(ref schema) = self.config.response_schema {
-                cap.finish_tool_schema_json = Some(schema.clone());
+            // 2. Setup hook runner and register pending hooks
+            for hook in &self.config.hooks {
+                self.hook_runner.register(hook.clone()).await;
             }
 
-            let strategy = crate::wasm::WasmConnectionStrategy {
-                gemini_config: self.config.gemini_config.clone(),
-                capabilities_config: cap,
-                system_instructions: self.config.system_instructions.clone(),
-                save_dir: self.config.save_dir.clone(),
-                workspaces: self.config.workspaces.clone().unwrap_or_default(),
-                skills_paths: self.config.skills_paths.clone(),
-                tool_runner: Some(self.tool_runner.clone()),
-                hook_runner: Some(self.hook_runner.clone()),
-                conversation_id: self.config.conversation_id.clone().unwrap_or_default(),
-            };
-
-            let conn = strategy.connect().await?;
-            let conversation = Arc::new(Conversation::new(
-                crate::connection::AnyConnection::Wasm(Arc::new(conn)),
-                None,
-            ));
-            self.conversation = Some(conversation.clone());
-
-            // 7. Start triggers
-            if !self.config.triggers.is_empty() {
-                let runner = TriggerRunner::new(self.config.triggers.clone());
-                runner.start(&conversation.connection());
-                self.trigger_runner = Some(runner);
+            // 3. Process capabilities and active tools
+            let enabled_tools = self.config.capabilities.enabled_tools.clone();
+            let disabled_tools = self.config.capabilities.disabled_tools.clone();
+            if enabled_tools.is_some() && disabled_tools.is_some() {
+                return Err(anyhow!(
+                    "enabled_tools and disabled_tools are mutually exclusive"
+                ));
             }
 
-            Ok(())
-        }
+            let active_tools = enabled_tools.unwrap_or_else(|| {
+                disabled_tools.map_or_else(
+                    || {
+                        vec![
+                            BuiltinTools::CreateFile,
+                            BuiltinTools::EditFile,
+                            BuiltinTools::FindFile,
+                            BuiltinTools::ListDir,
+                            BuiltinTools::RunCommand,
+                            BuiltinTools::SearchDir,
+                            BuiltinTools::ViewFile,
+                            BuiltinTools::StartSubagent,
+                            BuiltinTools::GenerateImage,
+                            BuiltinTools::Finish,
+                        ]
+                    },
+                    |disabled| {
+                        let all = vec![
+                            BuiltinTools::CreateFile,
+                            BuiltinTools::EditFile,
+                            BuiltinTools::FindFile,
+                            BuiltinTools::ListDir,
+                            BuiltinTools::RunCommand,
+                            BuiltinTools::SearchDir,
+                            BuiltinTools::ViewFile,
+                            BuiltinTools::StartSubagent,
+                            BuiltinTools::GenerateImage,
+                            BuiltinTools::Finish,
+                        ];
+                        all.into_iter().filter(|t| !disabled.contains(t)).collect()
+                    },
+                )
+            });
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut cap = self.config.capabilities.clone();
-            if let Some(ref schema) = self.config.response_schema {
-                cap.finish_tool_schema_json = Some(schema.clone());
+            let read_only = BuiltinTools::read_only();
+            let has_write_tools = active_tools.iter().any(|t| !read_only.contains(t));
+
+            // 4. Set up policies
+            let mut final_policies = self.config.policies.clone().unwrap_or_else(|| {
+                // Default to confirm_run_command
+                policy::confirm_run_command(None)
+            });
+
+            // Prepend workspace scoping policies if workspaces are configured
+            let workspaces = self.config.workspaces.clone().unwrap_or_else(|| {
+                std::env::current_dir().map_or_else(
+                    |_| Vec::new(),
+                    |cwd| vec![cwd.to_string_lossy().into_owned()],
+                )
+            });
+
+            if !workspaces.is_empty() {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                let app_data_dir = self
+                    .config
+                    .app_data_dir
+                    .clone()
+                    .unwrap_or_else(|| format!("{home}/.gemini/antigravity"));
+                let mut allowed_paths = workspaces;
+                allowed_paths.push(app_data_dir);
+                let mut ws_policies = policy::workspace_only(allowed_paths);
+                ws_policies.append(&mut final_policies);
+                final_policies = ws_policies;
             }
 
-            let strategy = LocalConnectionStrategy::new(
-                binary_path,
-                self.config.gemini_config.clone(),
-                cap,
-                self.config.system_instructions.clone(),
-                self.config.save_dir.clone(),
-                self.config.workspaces.clone().unwrap_or_default(),
-                self.config.skills_paths.clone(),
-                Some(self.tool_runner.clone()),
-                Some(self.hook_runner.clone()),
-                self.config.conversation_id.clone().unwrap_or_default(),
-            );
-
-            let conn = strategy.connect().await?;
-            let conversation = Arc::new(Conversation::new(
-                crate::connection::AnyConnection::Local(Arc::new(conn)),
-                None,
-            ));
-            self.conversation = Some(conversation.clone());
-
-            // 7. Start triggers
-            if !self.config.triggers.is_empty() {
-                let runner = TriggerRunner::new(self.config.triggers.clone());
-                runner.start(&conversation.connection());
-                self.trigger_runner = Some(runner);
+            // Safety policy check: if write tools are enabled, policies cannot be empty
+            if has_write_tools && final_policies.is_empty() {
+                return Err(anyhow!(
+                    "Write tools are enabled without a safety policy. Add policies=[policy.allow_all()] to approve all tool calls, or policies=[policy.deny_all(), policy.allow(\"tool_name\")] to selectively allow specific tools."
+                ));
             }
 
-            Ok(())
-        }
+            if !final_policies.is_empty() {
+                let enforcer = Arc::new(PolicyEnforcer::new(final_policies));
+                self.hook_runner.register(enforcer).await;
+            }
+
+            // 5. Register configured tools
+            for tool in &self.config.tools {
+                self.tool_runner.register(tool.clone()).await;
+            }
+
+            // 6. Build and connect strategy
+            #[cfg(target_arch = "wasm32")]
+            {
+                let mut cap = self.config.capabilities.clone();
+                if let Some(ref schema) = self.config.response_schema {
+                    cap.finish_tool_schema_json = Some(schema.clone());
+                }
+
+                let strategy = crate::wasm::WasmConnectionStrategy {
+                    gemini_config: self.config.gemini_config.clone(),
+                    capabilities_config: cap,
+                    system_instructions: self.config.system_instructions.clone(),
+                    save_dir: self.config.save_dir.clone(),
+                    workspaces: self.config.workspaces.clone().unwrap_or_default(),
+                    skills_paths: self.config.skills_paths.clone(),
+                    tool_runner: Some(self.tool_runner.clone()),
+                    hook_runner: Some(self.hook_runner.clone()),
+                    conversation_id: self.config.conversation_id.clone().unwrap_or_default(),
+                };
+
+                let conn = strategy.connect().await?;
+                let conversation = Arc::new(Conversation::new(
+                    crate::connection::AnyConnection::Wasm(Arc::new(conn)),
+                    None,
+                ));
+
+                // 7. Start triggers
+                let mut trigger_runner = None;
+                if !self.config.triggers.is_empty() {
+                    let runner = TriggerRunner::new(self.config.triggers.clone());
+                    runner.start(&conversation.connection());
+                    trigger_runner = Some(runner);
+                }
+
+                Ok(Agent {
+                    config: self.config,
+                    tool_runner: self.tool_runner,
+                    hook_runner: self.hook_runner,
+                    state: Started {
+                        conversation,
+                        trigger_runner,
+                    },
+                })
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut cap = self.config.capabilities.clone();
+                if let Some(ref schema) = self.config.response_schema {
+                    cap.finish_tool_schema_json = Some(schema.clone());
+                }
+
+                let strategy = LocalConnectionStrategy::new(
+                    binary_path,
+                    self.config.gemini_config.clone(),
+                    cap,
+                    self.config.system_instructions.clone(),
+                    self.config.save_dir.clone(),
+                    self.config.workspaces.clone().unwrap_or_default(),
+                    self.config.skills_paths.clone(),
+                    Some(self.tool_runner.clone()),
+                    Some(self.hook_runner.clone()),
+                    self.config.conversation_id.clone().unwrap_or_default(),
+                );
+
+                let conn = strategy.connect().await?;
+                let conversation = Arc::new(Conversation::new(
+                    crate::connection::AnyConnection::Local(Arc::new(conn)),
+                    None,
+                ));
+
+                // 7. Start triggers
+                let trigger_runner = if self.config.triggers.is_empty() {
+                    None
+                } else {
+                    let runner = TriggerRunner::new(self.config.triggers.clone());
+                    runner.start(&conversation.connection());
+                    Some(runner)
+                };
+
+                Ok(Agent {
+                    config: self.config,
+                    tool_runner: self.tool_runner,
+                    hook_runner: self.hook_runner,
+                    state: Started {
+                        conversation,
+                        trigger_runner,
+                    },
+                })
+            }
+        }) // end Box::pin
     }
+}
 
+impl Agent<Started> {
     /// Sends a prompt message to the active agent session and awaits the final completed response.
     ///
     /// # Errors
     ///
-    /// Returns an error if the agent is not yet started or if the execution stream encounters a failure.
+    /// Returns an error if the execution stream encounters a failure.
     pub async fn chat(&self, prompt: &str) -> Result<ChatResponse, anyhow::Error> {
-        let conversation = self.conversation()?;
-        conversation.chat_to_completion(prompt).await
+        self.state.conversation.chat_to_completion(prompt).await
     }
 
     /// Returns the active [`Conversation`] session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the agent is not yet started.
-    pub fn conversation(&self) -> Result<Arc<Conversation>, anyhow::Error> {
-        self.conversation
-            .clone()
-            .ok_or_else(|| anyhow!("Agent session not started. Use start() first."))
+    pub fn conversation(&self) -> Arc<Conversation> {
+        self.state.conversation.clone()
     }
 
-    /// Returns the active conversation ID if the session has started.
-    pub fn conversation_id(&self) -> Option<String> {
-        self.conversation
-            .as_ref()
-            .map(|c| c.conversation_id().to_string())
+    /// Returns the active conversation ID.
+    pub fn conversation_id(&self) -> String {
+        self.state.conversation.conversation_id().to_string()
     }
 
     /// Gracefully stops the agent connection and disconnects the underlying harness.
@@ -380,11 +399,187 @@ impl Agent {
     /// # Errors
     ///
     /// Returns an error if closing the connection fails.
-    pub async fn stop(&mut self) -> Result<(), anyhow::Error> {
-        if let Some(conversation) = self.conversation.take() {
-            conversation.disconnect().await?;
-        }
+    pub async fn stop(&self) -> Result<(), anyhow::Error> {
+        self.state.conversation.disconnect().await?;
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct NoPolicies;
+#[derive(Debug)]
+pub struct HasPolicies;
+
+pub struct AgentBuilder<P = NoPolicies> {
+    config: AgentConfig,
+    _policy_marker: std::marker::PhantomData<P>,
+}
+
+impl<P> std::fmt::Debug for AgentBuilder<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentBuilder")
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl AgentBuilder<NoPolicies> {
+    pub fn new() -> Self {
+        Self {
+            config: AgentConfig::default(),
+            _policy_marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Default for AgentBuilder<NoPolicies> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P> AgentBuilder<P> {
+    pub fn binary_path(mut self, path: impl Into<String>) -> Self {
+        self.config.binary_path = Some(path.into());
+        self
+    }
+
+    pub fn gemini_config(mut self, gemini_config: GeminiConfig) -> Self {
+        self.config.gemini_config = gemini_config;
+        self
+    }
+
+    pub fn api_key(mut self, key: impl Into<String>) -> Self {
+        self.config.gemini_config.api_key = Some(key.into());
+        self
+    }
+
+    pub fn default_model(mut self, model: impl Into<String>) -> Self {
+        self.config.gemini_config.models.default.name = model.into();
+        self
+    }
+
+    pub fn capabilities(mut self, capabilities: CapabilitiesConfig) -> Self {
+        self.config.capabilities = capabilities;
+        self
+    }
+
+    pub fn system_instructions(mut self, system_instructions: SystemInstructions) -> Self {
+        self.config.system_instructions = Some(system_instructions);
+        self
+    }
+
+    pub fn save_dir(mut self, save_dir: impl Into<String>) -> Self {
+        self.config.save_dir = Some(save_dir.into());
+        self
+    }
+
+    pub fn workspaces(mut self, workspaces: Vec<String>) -> Self {
+        self.config.workspaces = Some(workspaces);
+        self
+    }
+
+    pub fn skills_paths(mut self, skills_paths: Vec<String>) -> Self {
+        self.config.skills_paths = skills_paths;
+        self
+    }
+
+    pub fn hooks(mut self, hooks: Vec<Arc<dyn DynHook>>) -> Self {
+        self.config.hooks = hooks;
+        self
+    }
+
+    pub fn triggers(mut self, triggers: Vec<Arc<dyn DynTrigger>>) -> Self {
+        self.config.triggers = triggers;
+        self
+    }
+
+    pub fn tools(mut self, tools: Vec<Arc<dyn DynTool>>) -> Self {
+        self.config.tools = tools;
+        self
+    }
+
+    pub fn tool(mut self, tool: Arc<dyn DynTool>) -> Self {
+        self.config.tools.push(tool);
+        self
+    }
+
+    pub fn hook(mut self, hook: Arc<dyn DynHook>) -> Self {
+        self.config.hooks.push(hook);
+        self
+    }
+
+    pub fn trigger(mut self, trigger: Arc<dyn DynTrigger>) -> Self {
+        self.config.triggers.push(trigger);
+        self
+    }
+
+    pub fn policy(mut self, policy: Policy) -> AgentBuilder<HasPolicies> {
+        let mut policies = self.config.policies.take().unwrap_or_default();
+        policies.push(policy);
+        self.config.policies = Some(policies);
+        AgentBuilder {
+            config: self.config,
+            _policy_marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn conversation_id(mut self, conversation_id: impl Into<String>) -> Self {
+        self.config.conversation_id = Some(conversation_id.into());
+        self
+    }
+
+    pub fn app_data_dir(mut self, app_data_dir: impl Into<String>) -> Self {
+        self.config.app_data_dir = Some(app_data_dir.into());
+        self
+    }
+
+    pub fn response_schema(mut self, response_schema: impl Into<String>) -> Self {
+        self.config.response_schema = Some(response_schema.into());
+        self
+    }
+
+    pub fn policies(self, policies: Vec<Policy>) -> AgentBuilder<HasPolicies> {
+        let mut config = self.config;
+        config.policies = Some(policies);
+        AgentBuilder {
+            config,
+            _policy_marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn allow_all(self) -> AgentBuilder<HasPolicies> {
+        let mut config = self.config;
+        config.policies = Some(vec![policy::allow_all()]);
+        AgentBuilder {
+            config,
+            _policy_marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn read_only(self) -> AgentBuilder<HasPolicies> {
+        let mut config = self.config;
+        let read_only_tools = BuiltinTools::read_only();
+        let mut policies = vec![policy::deny_all()];
+        for tool in read_only_tools {
+            policies.push(policy::allow(tool.as_str()));
+        }
+        config.policies = Some(policies);
+        AgentBuilder {
+            config,
+            _policy_marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Builder escape hatch to construct `Agent<Unstarted>` without compile-time check for policies.
+    pub fn build_unchecked(self) -> Agent<Unstarted> {
+        Agent::new(self.config)
+    }
+}
+
+impl AgentBuilder<HasPolicies> {
+    pub fn build(self) -> Agent<Unstarted> {
+        Agent::new(self.config)
     }
 }
 

@@ -22,17 +22,14 @@
 //! ## Quickstart Example
 //!
 //! ```no_run
-//! use antigravity_sdk_rust::agent::{Agent, AgentConfig};
-//! use antigravity_sdk_rust::policy;
+//! use antigravity_sdk_rust::agent::Agent;
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), anyhow::Error> {
-//!     let mut config = AgentConfig::default();
-//!     // Allow all tools (e.g., file system, shell access)
-//!     config.policies = Some(vec![policy::allow_all()]);
-//!
-//!     let mut agent = Agent::new(config);
-//!     agent.start().await?;
+//!     let agent = Agent::builder()
+//!         .allow_all()
+//!         .build();
+//!     let agent = agent.start().await?;
 //!
 //!     let response = agent.chat("Say hello").await?;
 //!     println!("Agent: {}", response.text);

@@ -19,9 +19,8 @@
 //! spin build --up
 //! ```
 
-use antigravity_sdk_rust::agent::{Agent, AgentConfig};
-use antigravity_sdk_rust::policy;
-use antigravity_sdk_rust::types::{CustomSystemInstructions, GeminiConfig, SystemInstructions};
+use antigravity_sdk_rust::agent::{Agent, Started};
+use antigravity_sdk_rust::types::{CustomSystemInstructions, SystemInstructions};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -29,20 +28,17 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::EnvFilter;
 
 /// Shared application state containing the SDK Agent.
-type AgentState = Arc<Mutex<Agent>>;
+type AgentState = Arc<Agent<Started>>;
 
 /// Request body for the `/chat` endpoint.
 #[derive(Debug, Deserialize)]
 struct ChatRequest {
     message: String,
 }
-
-
 
 /// POST /chat — Send a message to the Agent and get a response.
 ///
@@ -52,12 +48,9 @@ async fn chat_handler(
     State(agent): State<AgentState>,
     Json(req): Json<ChatRequest>,
 ) -> impl IntoResponse {
-    let agent_guard = agent.lock().await;
-
-    match agent_guard.chat(&req.message).await {
+    match agent.chat(&req.message).await {
         Ok(response) => {
-            let conversation_id = agent_guard.conversation_id();
-            drop(agent_guard);
+            let conversation_id = agent.conversation_id();
 
             (
                 StatusCode::OK,
@@ -68,7 +61,6 @@ async fn chat_handler(
             )
         }
         Err(e) => {
-            drop(agent_guard);
             tracing::error!("Agent chat error: {:?}", e);
 
             (
@@ -103,48 +95,48 @@ async fn main() {
         .unwrap_or(8080);
 
     // 4. Initialize the antigravity-sdk-rust Agent
-    let mut agent_config = AgentConfig::default();
-
-    // Configure Gemini
-    let mut gemini_config = GeminiConfig::default();
-    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        gemini_config.api_key = Some(api_key);
-    }
-    gemini_config.models.default.name = std::env::var("GEMINI_MODEL")
+    let harness_path = std::env::var("ANTIGRAVITY_HARNESS_PATH").ok();
+    let api_key = std::env::var("GEMINI_API_KEY").ok();
+    let model = std::env::var("GEMINI_MODEL")
         .unwrap_or_else(|_| "gemini-3.5-flash".to_string());
-    agent_config.gemini_config = gemini_config;
 
-    // Set policies — allow all for this demo
-    agent_config.policies = Some(vec![policy::allow_all()]);
-
-    // Set custom system instructions
-    agent_config.system_instructions = Some(SystemInstructions::Custom(
-        CustomSystemInstructions {
-            text: "You are a helpful AI assistant in a chat interface. \
-                   Keep responses concise and conversational. \
-                   Use markdown formatting when helpful."
-                .to_string(),
-        },
-    ));
-
-    // Check for harness binary path
-    if let Ok(harness_path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
-        agent_config.binary_path = Some(harness_path);
+    let mut builder = Agent::builder();
+    if let Some(path) = harness_path {
+        builder = builder.binary_path(path);
+    }
+    if let Some(key) = api_key {
+        builder = builder.api_key(key);
     }
 
-    // Disable all file/command tools — this is a chat-only sidecar
-    agent_config.capabilities.enabled_tools = Some(vec![]);
+    let agent = builder
+        .default_model(model)
+        .allow_all()
+        .system_instructions(SystemInstructions::Custom(
+            CustomSystemInstructions {
+                text: "You are a helpful AI assistant in a chat interface. \
+                       Keep responses concise and conversational. \
+                       Use markdown formatting when helpful."
+                    .to_string(),
+            },
+        ))
+        .capabilities(antigravity_sdk_rust::types::CapabilitiesConfig {
+            enabled_tools: Some(vec![]),
+            disabled_tools: None,
+            compaction_threshold: None,
+            image_model: None,
+            finish_tool_schema_json: None,
+        })
+        .build();
 
     // Start the Agent
-    let mut agent = Agent::new(agent_config);
     tracing::info!("Starting antigravity-sdk-rust Agent...");
-    agent
+    let agent = agent
         .start()
         .await
         .expect("Failed to start Agent. Is localharness installed? Set ANTIGRAVITY_HARNESS_PATH if needed.");
     tracing::info!("Agent started successfully");
 
-    let agent_state: AgentState = Arc::new(Mutex::new(agent));
+    let agent_state: AgentState = Arc::new(agent);
 
     // 5. Build Axum router
     let cors = CorsLayer::new()

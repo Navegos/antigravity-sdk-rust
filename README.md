@@ -53,16 +53,18 @@ cargo run --example hello_world
 The `Agent` struct manages the full lifecycle — binary discovery, tool wiring, hook registration, and policy defaults.
 
 ```rust
-use antigravity_sdk_rust::agent::{Agent, AgentConfig};
-use antigravity_sdk_rust::policy;
+use antigravity_sdk_rust::agent::Agent;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let mut config = AgentConfig::default();
-    config.policies = Some(vec![policy::allow_all()]);
+    // Configures and constructs the Agent using the builder pattern.
+    // PhantomData guarantees compile-time verification of safety policies.
+    let agent = Agent::builder()
+        .allow_all()
+        .build();
 
-    let mut agent = Agent::new(config);
-    agent.start().await?;
+    // Spawns the harness session and transitions the Agent state to Started.
+    let agent = agent.start().await?;
 
     let response = agent.chat("Say 'Hello World!'").await?;
     println!("Agent: {}", response.text);

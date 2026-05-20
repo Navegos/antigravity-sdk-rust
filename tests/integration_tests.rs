@@ -54,10 +54,10 @@ async fn test_agent_chat_integration() {
             .into_owned(),
     ]);
 
-    let mut agent = Agent::new(config);
+    let agent = Agent::new(config);
 
     // 1. Start agent
-    agent.start().await.expect("Failed to start agent");
+    let agent = agent.start().await.expect("Failed to start agent");
 
     // 2. Chat with agent
     let response = agent
@@ -73,7 +73,7 @@ async fn test_agent_chat_integration() {
     assert_eq!(response.steps.len(), 2);
 
     // 4. Verify conversation metadata
-    let conversation = agent.conversation().expect("Failed to get conversation");
+    let conversation = agent.conversation();
     assert_eq!(conversation.conversation_id(), "test_conv_123");
 
     // 5. Stop agent
@@ -92,7 +92,7 @@ async fn test_agent_start_mutually_exclusive_capabilities() {
         finish_tool_schema_json: None,
     };
 
-    let mut agent = Agent::new(config);
+    let agent = Agent::new(config);
     let result = agent.start().await;
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
@@ -154,10 +154,10 @@ async fn test_agent_real_chat_integration() {
             .into_owned(),
     ]);
 
-    let mut agent = Agent::new(config);
+    let agent = Agent::new(config);
 
     // 1. Start agent
-    agent.start().await.expect("Failed to start agent");
+    let agent = agent.start().await.expect("Failed to start agent");
 
     // 2. Chat with agent
     let response = agent
@@ -174,7 +174,7 @@ async fn test_agent_real_chat_integration() {
     );
 
     // 4. Verify conversation metadata
-    let conversation = agent.conversation().expect("Failed to get conversation");
+    let conversation = agent.conversation();
     assert!(!conversation.conversation_id().is_empty());
 
     // 5. Stop agent
