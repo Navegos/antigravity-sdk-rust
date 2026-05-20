@@ -4,17 +4,33 @@ The Google Antigravity SDK is a Rust library for building AI agents powered by A
 
 ## Installation
 
-Add this to your `Cargo.toml`:
+1. Add the SDK to your `Cargo.toml`:
+   ```toml
+   [dependencies]
+   antigravity-sdk-rust = { path = "path/to/antigravity-sdk-rust" }
+   tokio = { version = "1", features = ["full"] }
+   ```
 
-```toml
-[dependencies]
-antigravity-sdk-rust = { path = "path/to/antigravity-sdk-rust" }
-tokio = { version = "1", features = ["full"] }
-```
+2. **Obtain the `localharness` binary:**
+   The SDK relies on a compiled native Go runtime binary (`localharness`) to orchestrate agent operations. You have two options to install it:
+
+   - **Option A: Without Python/pip (Recommended for Rust-only environments & web servers)**
+     Run the helper installer script to download and extract the binary directly from PyPI (wheels are standard ZIP files):
+     ```sh
+     ./scripts/install_harness.sh
+     export ANTIGRAVITY_HARNESS_PATH="$(pwd)/bin/localharness"
+     ```
+
+   - **Option B: Using Python/pip**
+     If Python is already installed on your development machine, simply run:
+     ```sh
+     pip install google-antigravity
+     ```
+     The Rust SDK will automatically locate the binary inside the Python package installation directory fallback.
 
 ## Quickstart
 
-Get started by running the hello_world example:
+Get started by setting your API key and running the `hello_world` example:
 
 ```sh
 export GEMINI_API_KEY="your_api_key_here"
