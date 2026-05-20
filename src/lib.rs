@@ -22,6 +22,7 @@ pub mod agent;
 pub mod connection;
 pub mod conversation;
 pub mod hooks;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod local;
 pub mod policy;
 pub mod tools;

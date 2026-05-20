@@ -1,5 +1,6 @@
 use crate::conversation::Conversation;
 use crate::hooks::{Hook, HookRunner};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::local::LocalConnectionStrategy;
 use crate::policy::{self, Policy, PolicyEnforcer};
 use crate::tools::{Tool, ToolRunner};
@@ -111,6 +112,7 @@ impl Agent {
         }
 
         // 1. Resolve binary path
+        #[cfg(not(target_arch = "wasm32"))]
         let binary_path = self.config.binary_path.clone()
             .or_else(get_default_binary_path)
             .ok_or_else(|| anyhow!("Could not find default localharness binary. Please specify binary_path explicitly."))?;
@@ -212,36 +214,44 @@ impl Agent {
         }
 
         // 6. Build and connect strategy
-        let mut cap = self.config.capabilities.clone();
-        if let Some(ref schema) = self.config.response_schema {
-            cap.finish_tool_schema_json = Some(schema.clone());
+        #[cfg(target_arch = "wasm32")]
+        {
+            return Err(anyhow!("Default LocalConnection is not supported on WebAssembly. Implement and use a custom connection strategy."));
         }
 
-        let strategy = LocalConnectionStrategy::new(
-            binary_path,
-            self.config.gemini_config.clone(),
-            cap,
-            self.config.system_instructions.clone(),
-            self.config.save_dir.clone(),
-            self.config.workspaces.clone().unwrap_or_default(),
-            self.config.skills_paths.clone(),
-            Some(self.tool_runner.clone()),
-            Some(self.hook_runner.clone()),
-            self.config.conversation_id.clone().unwrap_or_default(),
-        );
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut cap = self.config.capabilities.clone();
+            if let Some(ref schema) = self.config.response_schema {
+                cap.finish_tool_schema_json = Some(schema.clone());
+            }
 
-        let conn = strategy.connect().await?;
-        let conversation = Arc::new(Conversation::new(Arc::new(conn), None));
-        self.conversation = Some(conversation.clone());
+            let strategy = LocalConnectionStrategy::new(
+                binary_path,
+                self.config.gemini_config.clone(),
+                cap,
+                self.config.system_instructions.clone(),
+                self.config.save_dir.clone(),
+                self.config.workspaces.clone().unwrap_or_default(),
+                self.config.skills_paths.clone(),
+                Some(self.tool_runner.clone()),
+                Some(self.hook_runner.clone()),
+                self.config.conversation_id.clone().unwrap_or_default(),
+            );
 
-        // 7. Start triggers
-        if !self.config.triggers.is_empty() {
-            let runner = TriggerRunner::new(self.config.triggers.clone());
-            runner.start(&conversation.connection());
-            self.trigger_runner = Some(runner);
+            let conn = strategy.connect().await?;
+            let conversation = Arc::new(Conversation::new(Arc::new(conn), None));
+            self.conversation = Some(conversation.clone());
+
+            // 7. Start triggers
+            if !self.config.triggers.is_empty() {
+                let runner = TriggerRunner::new(self.config.triggers.clone());
+                runner.start(&conversation.connection());
+                self.trigger_runner = Some(runner);
+            }
+
+            Ok(())
         }
-
-        Ok(())
     }
 
     pub async fn chat(&self, prompt: &str) -> Result<ChatResponse, anyhow::Error> {
@@ -269,6 +279,7 @@ impl Agent {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn get_default_binary_path() -> Option<String> {
     if let Ok(path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
         return Some(path);
@@ -279,6 +290,25 @@ fn get_default_binary_path() -> Option<String> {
             let p = path.join("localharness");
             if p.exists() {
                 return Some(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    // Check Python site-packages as a fallback since google-antigravity Python package installs it there
+    if let Ok(output) = std::process::Command::new("python3")
+        .args(["-c", "import site; print('\\n'.join(site.getsitepackages()))"])
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let p = std::path::Path::new(line.trim())
+                    .join("google")
+                    .join("antigravity")
+                    .join("bin")
+                    .join("localharness");
+                if p.exists() {
+                    return Some(p.to_string_lossy().into_owned());
+                }
             }
         }
     }

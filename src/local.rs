@@ -24,7 +24,7 @@ use futures_util::stream::{self, BoxStream};
 use futures_util::{SinkExt, StreamExt};
 use prost::Message;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +40,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 pub struct LocalConnection {
     conversation_id: String,
     process: Arc<Mutex<tokio::process::Child>>,
+    child_stdin: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
     is_idle: Arc<AtomicBool>,
     step_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<Result<Step, anyhow::Error>>>>>,
     ws_tx: UnboundedSender<String>,
@@ -47,7 +48,7 @@ pub struct LocalConnection {
     hook_runner: Option<HookRunner>,
     parent_idle: Arc<Mutex<bool>>,
     active_subagent_ids: Arc<Mutex<HashSet<String>>>,
-    step_trackers: Arc<Mutex<HashSet<(String, u32)>>>,
+    step_trackers: Arc<Mutex<HashMap<(String, u32), StepTracker>>>,
 }
 
 impl std::fmt::Debug for LocalConnection {
@@ -76,14 +77,58 @@ impl Connection for LocalConnection {
 
     fn receive_steps(&self) -> BoxStream<'static, Result<Step, anyhow::Error>> {
         let step_rx = self.step_rx.clone();
+        let is_idle = self.is_idle.clone();
         stream::unfold((), move |()| {
             let step_rx = step_rx.clone();
+            let is_idle = is_idle.clone();
             async move {
-                let mut guard = step_rx.lock().await;
-                if let Some(ref mut rx) = *guard {
-                    rx.recv().await.map(|step| (step, ()))
-                } else {
-                    None
+                loop {
+                    let mut guard = step_rx.lock().await;
+                    if let Some(ref mut rx) = *guard {
+                        match rx.try_recv() {
+                            Ok(step_res) => {
+                                match &step_res {
+                                    Ok(step) if step.id == "IDLE_SENTINEL" => {
+                                        if is_idle.load(Ordering::SeqCst) {
+                                            return None;
+                                        }
+                                        continue;
+                                    }
+                                    _ => return Some((step_res, ())),
+                                }
+                            }
+                            Err(mpsc::error::TryRecvError::Empty) => {
+                                if is_idle.load(Ordering::SeqCst) {
+                                    return None;
+                                }
+                                drop(guard);
+                                let mut guard2 = step_rx.lock().await;
+                                if let Some(ref mut rx2) = *guard2 {
+                                    match rx2.recv().await {
+                                        Some(step_res) => {
+                                            match &step_res {
+                                                Ok(step) if step.id == "IDLE_SENTINEL" => {
+                                                    if is_idle.load(Ordering::SeqCst) {
+                                                        return None;
+                                                    }
+                                                    continue;
+                                                }
+                                                _ => return Some((step_res, ())),
+                                            }
+                                        }
+                                        None => return None,
+                                    }
+                                } else {
+                                    return None;
+                                }
+                            }
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                return None;
+                            }
+                        }
+                    } else {
+                        return None;
+                    }
                 }
             }
         })
@@ -91,6 +136,16 @@ impl Connection for LocalConnection {
     }
 
     async fn send(&self, content: &str) -> Result<(), anyhow::Error> {
+        self.is_idle.store(false, Ordering::SeqCst);
+        {
+            let mut p_idle = self.parent_idle.lock().await;
+            *p_idle = false;
+        }
+        {
+            let mut active = self.active_subagent_ids.lock().await;
+            active.clear();
+        }
+
         let input_event = InputEvent {
             event: Some(crate::proto::localharness::input_event::Event::UserInput(
                 content.to_string(),
@@ -553,7 +608,7 @@ impl LocalConnectionStrategy {
         let is_idle = Arc::new(AtomicBool::new(false));
         let parent_idle = Arc::new(Mutex::new(false));
         let active_subagent_ids = Arc::new(Mutex::new(HashSet::new()));
-        let step_trackers = Arc::new(Mutex::new(HashSet::new()));
+        let step_trackers = Arc::new(Mutex::new(HashMap::new()));
 
         let conn_ws_tx = ws_tx.clone();
         let conn_is_idle = is_idle.clone();
@@ -564,7 +619,8 @@ impl LocalConnectionStrategy {
         let tool_runner = self.tool_runner.clone();
         let hook_runner = self.hook_runner.clone();
         let conversation_id = self.conversation_id.clone();
-        let conn_conversation_id = conversation_id.clone();
+        let conn_cascade_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let conn_cascade_id_for_ws = conn_cascade_id.clone();
 
         // 8. Spawn Stderr Reader
         let mut reader = tokio::io::BufReader::new(child_stderr);
@@ -580,10 +636,12 @@ impl LocalConnectionStrategy {
         });
 
         // 9. Spawn WS Reader Loop
+        let pending_builtin_tool_calls = Arc::new(Mutex::new(HashMap::<(String, u32), ToolCall>::new()));
         tokio::spawn(async move {
             while let Some(msg_res) = ws_read.next().await {
                 match msg_res {
                     Ok(WsMessage::Text(raw_text)) => {
+                        tracing::debug!("WS raw message: {}", &raw_text[..raw_text.len().min(500)]);
                         match serde_json::from_str::<OutputEvent>(&raw_text) {
                             Ok(output_event) => {
                                 if let Some(event) = output_event.event {
@@ -593,7 +651,27 @@ impl LocalConnectionStrategy {
                                             let step_idx = step_update.step_index.unwrap_or(0);
                                             let key = (traj_id.clone(), step_idx);
 
-                                            let is_new = conn_step_trackers.lock().await.insert(key);
+                                            // Learn the cascade_id from the first StepUpdate
+                                            // where cascade_id == trajectory_id (Python parity)
+                                            {
+                                                let cascade_id_val = step_update.cascade_id.clone().unwrap_or_default();
+                                                if !cascade_id_val.is_empty() && cascade_id_val == traj_id {
+                                                    let mut cid = conn_cascade_id_for_ws.lock().await;
+                                                    if cid.is_none() {
+                                                        tracing::debug!("Learned cascade_id from StepUpdate: {}", cascade_id_val);
+                                                        *cid = Some(cascade_id_val);
+                                                    }
+                                                }
+                                            }
+
+                                            let mut trackers = conn_step_trackers.lock().await;
+                                            let tracker = trackers.entry(key.clone()).or_insert_with(|| StepTracker {
+                                                state: 0,
+                                                handled_requests: HashSet::new(),
+                                            });
+                                            if let Some(st) = step_update.state {
+                                                tracker.update_state(st as i32);
+                                            }
 
                                             // Map StepUpdate proto to Step domain model
                                             let step_type = if step_update.compaction.is_some() {
@@ -618,61 +696,8 @@ impl LocalConnectionStrategy {
                                             };
 
                                             let mut tool_calls = Vec::new();
-                                            // Look for active tool fields in step update
-                                            if let Some(ref fd) = step_update.find_file {
-                                                tool_calls.push(ToolCall {
-                                                    id: format!("{traj_id}_{step_idx}"),
-                                                    name: "FIND_FILE".to_string(),
-                                                    args: serde_json::json!({
-                                                        "directory_path": fd.directory_path,
-                                                        "query": fd.query,
-                                                    }),
-                                                    canonical_path: fd.directory_path.clone(),
-                                                });
-                                            }
-                                            if let Some(ref run) = step_update.run_command {
-                                                tool_calls.push(ToolCall {
-                                                    id: format!("{traj_id}_{step_idx}"),
-                                                    name: "RUN_COMMAND".to_string(),
-                                                    args: serde_json::json!({
-                                                        "command_line": run.command_line,
-                                                        "working_dir": run.working_dir,
-                                                    }),
-                                                    canonical_path: None,
-                                                });
-                                            }
-                                            if let Some(ref view) = step_update.view_file {
-                                                tool_calls.push(ToolCall {
-                                                    id: format!("{traj_id}_{step_idx}"),
-                                                    name: "VIEW_FILE".to_string(),
-                                                    args: serde_json::json!({
-                                                        "file_path": view.file_path,
-                                                        "start_line": view.start_line,
-                                                        "end_line": view.end_line,
-                                                    }),
-                                                    canonical_path: view.file_path.clone(),
-                                                });
-                                            }
-                                            if let Some(ref write) = step_update.create_file {
-                                                tool_calls.push(ToolCall {
-                                                    id: format!("{traj_id}_{step_idx}"),
-                                                    name: "CREATE_FILE".to_string(),
-                                                    args: serde_json::json!({
-                                                        "file_path": write.file_path,
-                                                        "contents": write.contents,
-                                                    }),
-                                                    canonical_path: write.file_path.clone(),
-                                                });
-                                            }
-                                            if let Some(ref edit) = step_update.edit_file {
-                                                tool_calls.push(ToolCall {
-                                                    id: format!("{traj_id}_{step_idx}"),
-                                                    name: "EDIT_FILE".to_string(),
-                                                    args: serde_json::json!({
-                                                        "file_path": edit.file_path,
-                                                    }),
-                                                    canonical_path: edit.file_path.clone(),
-                                                });
+                                            if let Some(tc) = extract_builtin_tool_call(&step_update) {
+                                                tool_calls.push(tc);
                                             }
 
                                             let source = match step_update.source {
@@ -716,6 +741,7 @@ impl LocalConnectionStrategy {
                                             });
 
                                             let error_msg = step_update.error_message.clone().unwrap_or_default();
+                                            let http_code = step_update.error.as_ref().and_then(|e| e.http_code).unwrap_or(0);
 
                                             let step = Step {
                                                 id: format!("{traj_id}_{step_idx}"),
@@ -735,13 +761,64 @@ impl LocalConnectionStrategy {
                                                 usage_metadata: usage,
                                                 cascade_id: step_update.cascade_id.clone().unwrap_or_default(),
                                                 trajectory_id: traj_id.clone(),
-                                                http_code: 0,
+                                                http_code,
                                             };
 
                                             let _ = step_tx.send(Ok(step));
 
+                                            // Detect platform-level errors (source=SYSTEM) and propagate them.
+                                            if source == StepSource::System && status == StepStatus::Error {
+                                                if http_code == 400 || http_code == 401 || http_code == 403 {
+                                                    let err_str = step_update.error.as_ref().and_then(|e| e.error_message.clone()).unwrap_or_else(|| "System error occurred.".to_string());
+                                                    let _ = step_tx.send(Err(anyhow!("System step error (HTTP {}): {}", http_code, err_str)));
+                                                    break;
+                                                }
+                                            }
+
+                                            // Dispatch post-tool-call or on-tool-error hooks for built-in tools
+                                            let state_val = step_update.state.unwrap_or(0);
+                                            if state_val == 2 || state_val == 4 {
+                                                let mut pending = pending_builtin_tool_calls.lock().await;
+                                                if let Some(tc) = pending.remove(&key) {
+                                                    if let Some(ref runner) = hook_runner {
+                                                        if state_val == 2 {
+                                                            let extracted = extract_tool_result(&step_update);
+                                                            let tr = ToolResult {
+                                                                name: tc.name.clone(),
+                                                                id: Some(tc.id.clone()),
+                                                                result: extracted.and_then(|r| r.result).or_else(|| step_update.text.clone().map(|t| Value::String(t))),
+                                                                error: None,
+                                                            };
+                                                            let runner_clone = runner.clone();
+                                                            tokio::spawn(async move {
+                                                                let _ = runner_clone.dispatch_post_tool_call(&tr).await;
+                                                            });
+                                                        } else {
+                                                            let err_msg = step_update.error_message.clone().unwrap_or_else(|| "Built-in tool failed".to_string());
+                                                            let err = anyhow!(err_msg);
+                                                            let runner_clone = runner.clone();
+                                                            tokio::spawn(async move {
+                                                                let _ = runner_clone.dispatch_on_tool_error(&err).await;
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                            }
+
                                             // Hook confirmation processing
-                                            if is_new {
+                                            let is_questions_new = if step_update.questions_request.is_some() {
+                                                tracker.mark_handled("questions_request")
+                                            } else {
+                                                false
+                                            };
+
+                                            let is_tool_conf_new = if step_update.tool_confirmation_request.is_some() {
+                                                tracker.mark_handled("tool_confirmation_request")
+                                            } else {
+                                                false
+                                            };
+
+                                            if is_questions_new {
                                                 if let Some(ref q_req) = step_update.questions_request {
                                                     let conn_ws_tx = conn_ws_tx.clone();
                                                     let hook_runner = hook_runner.clone();
@@ -813,23 +890,26 @@ impl LocalConnectionStrategy {
                                                         }
                                                     });
                                                 }
+                                            }
 
+                                            if is_tool_conf_new {
                                                 if step_update.tool_confirmation_request.is_some() {
                                                     let conn_ws_tx = conn_ws_tx.clone();
                                                     let hook_runner = hook_runner.clone();
                                                     let step_update_clone = step_update.clone();
+                                                    let pending_calls = pending_builtin_tool_calls.clone();
                                                     tokio::spawn(async move {
                                                         let mut allow = true;
-                                                        if let Some(ref runner) = hook_runner {
-                                                            // For testing/mocking we default allow to true or query hooks
-                                                            let tool_call = ToolCall {
-                                                                id: format!("{}_{}", step_update_clone.trajectory_id.clone().unwrap_or_default(), step_update_clone.step_index.unwrap_or(0)),
-                                                                name: "unknown".to_string(),
-                                                                args: Value::Null,
-                                                                canonical_path: None,
-                                                            };
-                                                            if let Ok(res) = runner.dispatch_pre_tool_call(&tool_call).await {
-                                                                allow = res.allow;
+                                                        let tool_call = extract_builtin_tool_call(&step_update_clone);
+                                                        if let Some(ref tc) = tool_call {
+                                                            if let Some(ref runner) = hook_runner {
+                                                                if let Ok(res) = runner.dispatch_pre_tool_call(tc).await {
+                                                                    allow = res.allow;
+                                                                }
+                                                            }
+                                                            if allow {
+                                                                let key = (step_update_clone.trajectory_id.clone().unwrap_or_default(), step_update_clone.step_index.unwrap_or(0));
+                                                                pending_calls.lock().await.insert(key, tc.clone());
                                                             }
                                                         }
 
@@ -850,7 +930,13 @@ impl LocalConnectionStrategy {
                                         }
                                         crate::proto::localharness::output_event::Event::TrajectoryStateUpdate(tsu) => {
                                             let sub_id = tsu.trajectory_id.clone().unwrap_or_default();
-                                            let is_subagent = !sub_id.is_empty() && sub_id != conn_conversation_id;
+                                            let learned_cascade = conn_cascade_id_for_ws.lock().await;
+                                            let is_subagent = match learned_cascade.as_ref() {
+                                                Some(cid) => !sub_id.is_empty() && sub_id != *cid,
+                                                None => false, // No cascade_id learned yet, treat everything as parent
+                                            };
+                                            tracing::debug!("TrajectoryStateUpdate: trajectory_id={:?}, state={:?}, is_subagent={}, learned_cascade_id={:?}", sub_id, tsu.state, is_subagent, *learned_cascade);
+                                            drop(learned_cascade);
 
                                             let mut active_subs = conn_active_subagents.lock().await;
                                             let mut p_idle = conn_parent_idle.lock().await;
@@ -867,9 +953,17 @@ impl LocalConnectionStrategy {
                                                 }
                                             }
 
-                                            if *p_idle && active_subs.is_empty() {
-                                                conn_is_idle.store(true, Ordering::SeqCst);
-                                            }
+                                            tracing::debug!("TrajectoryStateUpdate: p_idle={}, active_subs_empty={}", *p_idle, active_subs.is_empty());
+                                             if *p_idle && active_subs.is_empty() {
+                                                 if !conn_is_idle.swap(true, Ordering::SeqCst) {
+                                                    tracing::debug!("Connection transitioned to IDLE, sending sentinel");
+                                                     let sentinel = Step {
+                                                         id: "IDLE_SENTINEL".to_string(),
+                                                         ..Default::default()
+                                                     };
+                                                     let _ = step_tx.send(Ok(sentinel));
+                                                 }
+                                             }
                                         }
                                         crate::proto::localharness::output_event::Event::ToolCall(tool_call) => {
                                             let conn_ws_tx = conn_ws_tx.clone();
@@ -922,6 +1016,20 @@ impl LocalConnectionStrategy {
                                                     result.error = Some("No tool runner registered".to_string());
                                                 }
 
+                                                if result.error.is_some() {
+                                                    if let Some(ref runner) = hook_runner {
+                                                        let err_str = result.error.clone().unwrap_or_default();
+                                                        if let Ok((res, val)) = runner.dispatch_on_tool_error(&anyhow!(err_str)).await {
+                                                            if res.allow {
+                                                                result.result = val;
+                                                                result.error = None;
+                                                            }
+                                                        }
+                                                    }
+                                                } else if let Some(ref runner) = hook_runner {
+                                                    let _ = runner.dispatch_post_tool_call(&result).await;
+                                                }
+
                                                 let resp_json = if let Some(ref val) = result.result {
                                                     serde_json::to_string(val).unwrap_or_default()
                                                 } else if let Some(ref err) = result.error {
@@ -948,7 +1056,7 @@ impl LocalConnectionStrategy {
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("Failed to deserialize OutputEvent: {:?}", e);
+                                tracing::error!("Failed to deserialize OutputEvent: {:?}. Raw: {}", e, &raw_text[..raw_text.len().min(300)]);
                             }
                         }
                     }
@@ -969,6 +1077,7 @@ impl LocalConnectionStrategy {
         Ok(LocalConnection {
             conversation_id,
             process: Arc::new(Mutex::new(child)),
+            child_stdin: Arc::new(Mutex::new(Some(child_stdin))),
             is_idle,
             step_rx: Arc::new(Mutex::new(Some(step_rx))),
             ws_tx,
@@ -979,4 +1088,105 @@ impl LocalConnectionStrategy {
             step_trackers,
         })
     }
+}
+
+#[derive(Debug)]
+pub struct StepTracker {
+    state: i32,
+    handled_requests: HashSet<String>,
+}
+
+impl StepTracker {
+    pub fn update_state(&mut self, state: i32) {
+        self.state = state;
+    }
+
+    pub fn mark_handled(&mut self, request_name: &str) -> bool {
+        if self.state == 3 && !self.handled_requests.contains(request_name) {
+            self.handled_requests.insert(request_name.to_string());
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn extract_builtin_tool_call(step_update: &crate::proto::localharness::StepUpdate) -> Option<ToolCall> {
+    let traj_id = step_update.trajectory_id.clone().unwrap_or_default();
+    let step_idx = step_update.step_index.unwrap_or(0);
+    let id = format!("{traj_id}_{step_idx}");
+
+    if let Some(ref fd) = step_update.find_file {
+        return Some(ToolCall {
+            id,
+            name: "FIND_FILE".to_string(),
+            args: serde_json::json!({
+                "directory_path": fd.directory_path,
+                "query": fd.query,
+            }),
+            canonical_path: fd.directory_path.clone(),
+        });
+    }
+    if let Some(ref run) = step_update.run_command {
+        return Some(ToolCall {
+            id,
+            name: "RUN_COMMAND".to_string(),
+            args: serde_json::json!({
+                "command_line": run.command_line,
+                "working_dir": run.working_dir,
+            }),
+            canonical_path: None,
+        });
+    }
+    if let Some(ref view) = step_update.view_file {
+        return Some(ToolCall {
+            id,
+            name: "VIEW_FILE".to_string(),
+            args: serde_json::json!({
+                "file_path": view.file_path,
+                "start_line": view.start_line,
+                "end_line": view.end_line,
+            }),
+            canonical_path: view.file_path.clone(),
+        });
+    }
+    if let Some(ref write) = step_update.create_file {
+        return Some(ToolCall {
+            id,
+            name: "CREATE_FILE".to_string(),
+            args: serde_json::json!({
+                "file_path": write.file_path,
+                "contents": write.contents,
+            }),
+            canonical_path: write.file_path.clone(),
+        });
+    }
+    if let Some(ref edit) = step_update.edit_file {
+        return Some(ToolCall {
+            id,
+            name: "EDIT_FILE".to_string(),
+            args: serde_json::json!({
+                "file_path": edit.file_path,
+            }),
+            canonical_path: edit.file_path.clone(),
+        });
+    }
+    None
+}
+
+fn extract_tool_result(step_update: &crate::proto::localharness::StepUpdate) -> Option<ToolResult> {
+    let traj_id = step_update.trajectory_id.clone().unwrap_or_default();
+    let step_idx = step_update.step_index.unwrap_or(0);
+    let id = format!("{traj_id}_{step_idx}");
+
+    let tool_call = extract_builtin_tool_call(step_update)?;
+    let result = step_update.text.clone().map(|t| Value::String(t));
+    let error = step_update.error_message.clone();
+
+    Some(ToolResult {
+        id: Some(id),
+        name: tool_call.name,
+        result,
+        error,
+    })
 }
