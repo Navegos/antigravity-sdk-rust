@@ -215,7 +215,14 @@ impl Connection for LocalConnection {
 
     async fn send_tool_response(&self, id: &str, result: ToolResult) -> Result<(), anyhow::Error> {
         let resp_json = if let Some(ref val) = result.result {
-            serde_json::to_string(val)?
+            // The Go harness expects responseJson to always be a JSON object.
+            // If the tool returned a non-object value (string, number, array, etc.),
+            // wrap it under a "result" key to match the Python SDK's behavior.
+            if val.is_object() {
+                serde_json::to_string(val)?
+            } else {
+                serde_json::to_string(&serde_json::json!({ "result": val }))?
+            }
         } else if let Some(ref err) = result.error {
             serde_json::to_string(&serde_json::json!({ "error": err }))?
         } else {
@@ -1006,9 +1013,12 @@ impl LocalConnectionStrategy {
                                                     args,
                                                     canonical_path: None,
                                                 };
+                                                tracing::debug!("ToolCall event received: id={}, name={}", tc.id, tc.name);
 
                                                 let allow = if let Some(runner) = hook_runner.as_ref() {
-                                                    runner.dispatch_pre_tool_call(&tc).await.map_or(true, |res| res.allow)
+                                                    let res = runner.dispatch_pre_tool_call(&tc).await.map_or(true, |res| res.allow);
+                                                    tracing::debug!("Policy decision for tool {}: allow={}", tc.name, res);
+                                                    res
                                                 } else {
                                                     true
                                                 };
@@ -1037,6 +1047,7 @@ impl LocalConnectionStrategy {
                                                 };
 
                                                 if let Some(ref runner) = tool_runner {
+                                                    tracing::debug!("Executing tool {} with args: {:?}", tc.name, tc.args);
                                                     let results = runner.process_tool_calls(vec![tc]).await;
                                                     if let Some(r) = results.into_iter().next() {
                                                         result = r;
@@ -1057,8 +1068,14 @@ impl LocalConnectionStrategy {
                                                     let _ = runner.dispatch_post_tool_call(&result).await;
                                                 }
 
+                                                // The Go harness expects responseJson to always be a JSON object.
+                                                // Wrap non-object values (string, number, array, etc.) under "result".
                                                 let resp_json = if let Some(ref val) = result.result {
-                                                    serde_json::to_string(val).unwrap_or_default()
+                                                    if val.is_object() {
+                                                        serde_json::to_string(val).unwrap_or_default()
+                                                    } else {
+                                                        serde_json::to_string(&serde_json::json!({ "result": val })).unwrap_or_default()
+                                                    }
                                                 } else if let Some(ref err) = result.error {
                                                     serde_json::to_string(&serde_json::json!({ "error": err })).unwrap_or_default()
                                                 } else {
@@ -1075,6 +1092,7 @@ impl LocalConnectionStrategy {
                                                     event: Some(crate::proto::localharness::input_event::Event::ToolResponse(resp)),
                                                 };
                                                 if let Ok(raw_json) = serde_json::to_string(&input_event) {
+                                                    tracing::debug!("Sending ToolResponse input_event: {}", raw_json);
                                                     let _ = conn_ws_tx.send(raw_json);
                                                 }
                                             });
