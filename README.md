@@ -1,4 +1,9 @@
-# Google Antigravity Rust SDK
+   # Google Antigravity Rust SDK
+   
+
+https://github.com/user-attachments/assets/d68ad844-fd51-4c4f-a9c5-90ab3e1e6f1d
+
+
 
 [![CI](https://github.com/codeitlikemiley/antigravity-sdk-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/codeitlikemiley/antigravity-sdk-rust/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/antigravity-sdk-rust.svg)](https://crates.io/crates/antigravity-sdk-rust)
