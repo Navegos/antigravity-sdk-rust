@@ -3,7 +3,11 @@ name = "antigravity-sdk-rust"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-
+description = "Rust SDK for Google Antigravity and Gemini to build autonomous, stateful, and secure AI agents"
+repository = "https://github.com/codeitlikemiley/antigravity-sdk-rust"
+homepage = "https://github.com/codeitlikemiley/antigravity-sdk-rust"
+documentation = "https://docs.rs/antigravity-sdk-rust"
+readme = "README.md"
 
 [dependencies]
 prost = "0.12"
