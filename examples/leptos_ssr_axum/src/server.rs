@@ -7,7 +7,7 @@ use leptos_wasi::{
 use wasi::exports::http::incoming_handler::Guest;
 use wasi::http::proxy::export;
 
-use crate::app::{shell, App, GetMessages, SendMessage};
+use crate::app::{shell, App, ClearMessages, GetMessages, SendMessage};
 
 struct LeptosServer;
 
@@ -38,6 +38,7 @@ async fn handle_request(
     Handler::build(request, response_out)?
         .with_server_fn::<SendMessage, _>()
         .with_server_fn::<GetMessages, _>()
+        .with_server_fn::<ClearMessages, _>()
         .generate_routes(App)
         .handle_with_context(move || shell(leptos_options.clone()), || {})
         .await?;

@@ -4,7 +4,6 @@ use antigravity_sdk_rust::policy;
 use antigravity_sdk_rust::types::{
     BuiltinTools, CapabilitiesConfig, GeminiConfig, HookResult, ToolCall, ToolResult,
 };
-use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing_subscriber::EnvFilter;
@@ -13,7 +12,6 @@ struct SubagentHook {
     subagent_active: Arc<AtomicBool>,
 }
 
-#[async_trait]
 impl Hook for SubagentHook {
     async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
         if tool_call.name == "START_SUBAGENT" {

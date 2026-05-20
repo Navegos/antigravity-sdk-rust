@@ -2,7 +2,6 @@ use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::policy;
 use antigravity_sdk_rust::tools::Tool;
 use antigravity_sdk_rust::types::GeminiConfig;
-use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -10,7 +9,6 @@ use tracing_subscriber::EnvFilter;
 
 struct LookupSkuTool;
 
-#[async_trait]
 impl Tool for LookupSkuTool {
     fn name(&self) -> &'static str {
         "lookup_fruit_sku"
@@ -57,7 +55,6 @@ struct RecordFruitTool {
     inventory: Arc<Mutex<HashMap<String, u32>>>,
 }
 
-#[async_trait]
 impl Tool for RecordFruitTool {
     fn name(&self) -> &'static str {
         "record_fruit"

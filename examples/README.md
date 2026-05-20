@@ -83,6 +83,8 @@ Browser → Spin Component (WASI)
                └─ KV Store (chat history)
 ```
 
+> **Note**: While standard Spin components are restricted to `wasi:http` for outbound traffic (necessitating sidecar mode), the SDK compiles directly to the `wasm32-wasip1` target. In WASI environments that permit raw outbound TCP sockets, the SDK can connect directly to the host-side harness server via WebSockets using `WasmConnectionStrategy`.
+
 ---
 
 ### 4. Agent Server (Sidecar)

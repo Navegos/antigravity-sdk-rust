@@ -22,6 +22,8 @@ web-sys = { version = "0.3", features = ["Storage", "Window"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 antigravity-sdk-rust = { path = "../..", optional = true }
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+
 
 [workspace]
 

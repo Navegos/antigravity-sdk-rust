@@ -2,14 +2,12 @@ use antigravity_sdk_rust::agent::{Agent, AgentConfig};
 use antigravity_sdk_rust::policy;
 use antigravity_sdk_rust::tools::Tool;
 use antigravity_sdk_rust::types::GeminiConfig;
-use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 struct FetchNotesTool;
 
-#[async_trait]
 impl Tool for FetchNotesTool {
     fn name(&self) -> &'static str {
         "fetch_unstructured_meeting_notes"
