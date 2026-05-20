@@ -3,8 +3,7 @@ use leptos::prelude::*;
 use leptos_meta::*;
 use leptos_router::*;
 
-#[cfg(feature = "hydrate")]
-use web_sys::window;
+use crate::types::ChatMessage;
 
 #[cfg(feature = "ssr")]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -27,7 +26,6 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 
 #[component]
 pub fn App() -> impl IntoView {
-    // Provides context that manages stylesheets, titles, meta tags, etc.
     provide_meta_context();
 
     let fallback = || view! { "Page not found." }.into_view();
@@ -36,15 +34,15 @@ pub fn App() -> impl IntoView {
         <Stylesheet id="leptos" href="/pkg/leptos_ssr_axum.css" />
         <Meta
             name="description"
-            content="A website running its server-side as a WASI Component :D"
+            content="Antigravity SDK Chat — AI Agent powered by Gemini, running on Spin WASI"
         />
 
-        <Title text="Welcome to Leptos X Spin!" />
+        <Title text="Antigravity Chat" />
 
         <Router>
             <main>
                 <Routes fallback>
-                    <Route path=path!("") view=HomePage />
+                    <Route path=path!("") view=ChatPage />
                     <Route path=path!("/*any") view=NotFound />
                 </Routes>
             </main>
@@ -52,182 +50,205 @@ pub fn App() -> impl IntoView {
     }
 }
 
-/// Renders the home page of your application.
+/// Chat page component
 #[component]
-fn HomePage() -> impl IntoView {
-    let increment_action = ServerAction::<IncrementCount>::new();
+fn ChatPage() -> impl IntoView {
+    let send_action = ServerAction::<SendMessage>::new();
 
-    // Local optimistic count state
-    let (optimistic_count, set_optimistic_count) = signal(None::<u32>);
+    // Chat messages state
+    let (messages, set_messages) = signal(Vec::<ChatMessage>::new());
+    let (input_text, set_input_text) = signal(String::new());
 
-    // Server count resource
-    let count = Resource::new(move || increment_action.version().get(), |_| get_count());
+    // Load existing messages from KV store on mount
+    let initial_messages = Resource::new(|| (), |_| get_messages());
 
-    // Initialize from localStorage or server
     Effect::new(move |_| {
-        if optimistic_count.get().is_none() {
-            // Try to get from localStorage first
-            #[cfg(feature = "hydrate")]
-            {
-                if let Some(window) = window() {
-                    if let Ok(Some(storage)) = window.local_storage() {
-                        if let Ok(Some(cached_count_str)) = storage.get_item("spin_counter_count") {
-                            if let Ok(cached_count) = cached_count_str.parse::<u32>() {
-                                set_optimistic_count.set(Some(cached_count));
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Fallback to server count
-            if let Some(Ok(server_count)) = count.get() {
-                set_optimistic_count.set(Some(server_count));
-
-                // Cache in localStorage
-                #[cfg(feature = "hydrate")]
-                {
-                    if let Some(window) = window() {
-                        if let Ok(Some(storage)) = window.local_storage() {
-                            let _ = storage.set_item("spin_counter_count", &server_count.to_string());
-                        }
-                    }
-                }
+        if let Some(Ok(msgs)) = initial_messages.get() {
+            if !msgs.is_empty() {
+                set_messages.set(msgs);
             }
         }
     });
 
-    // Sync server updates to localStorage
+    // When server action completes, append the assistant response
     Effect::new(move |_| {
-        if let Some(Ok(server_count)) = count.get() {
-            // Only update if we have a successful server response and it's different
-            if let Some(current_optimistic) = optimistic_count.get() {
-                if server_count != current_optimistic {
-                    set_optimistic_count.set(Some(server_count));
-                }
-            }
-
-            // Always update localStorage with server value
-            #[cfg(feature = "hydrate")]
-            {
-                if let Some(window) = window() {
-                    if let Ok(Some(storage)) = window.local_storage() {
-                        let _ = storage.set_item("spin_counter_count", &server_count.to_string());
-                    }
-                }
-            }
+        if let Some(Ok(assistant_msg)) = send_action.value().get() {
+            set_messages.update(|msgs| {
+                msgs.push(assistant_msg);
+            });
         }
     });
 
-    // Optimistic increment
-    let on_click = move |_| {
-        // Immediately update UI
-        let new_count = optimistic_count.get().unwrap_or(0) + 1;
-        set_optimistic_count.set(Some(new_count));
-
-        // Update localStorage immediately
-        #[cfg(feature = "hydrate")]
-        {
-            if let Some(window) = window() {
-                if let Ok(Some(storage)) = window.local_storage() {
-                    let _ = storage.set_item("spin_counter_count", &new_count.to_string());
-                }
-            }
+    // Send handler
+    let on_send = move |_| {
+        let text = input_text.get();
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            return;
         }
 
-        // Trigger server action
-        increment_action.dispatch(IncrementCount {});
+        // Optimistically add user message to UI
+        let user_msg = ChatMessage {
+            role: "user".to_string(),
+            content: trimmed.clone(),
+            timestamp: 0, // Will be set server-side
+        };
+        set_messages.update(|msgs| {
+            msgs.push(user_msg);
+        });
+
+        // Clear input
+        set_input_text.set(String::new());
+
+        // Dispatch to server
+        send_action.dispatch(SendMessage { message: trimmed });
+    };
+
+    // Handle Enter key
+    let on_keydown = move |ev: leptos::ev::KeyboardEvent| {
+        if ev.key() == "Enter" && !ev.shift_key() {
+            ev.prevent_default();
+            let text = input_text.get();
+            let trimmed = text.trim().to_string();
+            if trimmed.is_empty() {
+                return;
+            }
+
+            let user_msg = ChatMessage {
+                role: "user".to_string(),
+                content: trimmed.clone(),
+                timestamp: 0,
+            };
+            set_messages.update(|msgs| {
+                msgs.push(user_msg);
+            });
+            set_input_text.set(String::new());
+            send_action.dispatch(SendMessage { message: trimmed });
+        }
     };
 
     view! {
-        <div class="min-h-screen bg-[#1a2332] flex items-center justify-center p-4">
-            <div class="bg-[#263343] rounded-xl shadow-2xl p-8 md:p-12 max-w-md w-full border border-[#3a4a5c]">
-                <div class="text-center space-y-8">
-                    // Header
-                    <div class="space-y-2">
-                        <div class="flex items-center justify-center gap-3 mb-4">
-                            // Fermyon-style logo placeholder
-                            <div class="w-10 h-10 bg-[#00d4aa] rounded-lg flex items-center justify-center">
-                                <span class="text-[#1a2332] font-bold text-xl">C</span>
-                            </div>
-                            <h1 class="text-3xl md:text-4xl font-medium text-white">
-                                "spin-counter"
-                            </h1>
+        <div class="min-h-screen bg-[#0f1720] flex flex-col">
+            // Header
+            <header class="bg-[#1a2332] border-b border-[#2a3a4c] px-6 py-4 flex items-center gap-3 shrink-0">
+                <div class="w-9 h-9 bg-[#00d4aa] rounded-lg flex items-center justify-center">
+                    <span class="text-[#0f1720] font-bold text-lg">A</span>
+                </div>
+                <div>
+                    <h1 class="text-white text-lg font-medium leading-tight">
+                        "Antigravity Chat"
+                    </h1>
+                    <p class="text-[#6b7d95] text-xs">
+                        "Powered by Gemini + Spin WASI"
+                    </p>
+                </div>
+                <div class="ml-auto flex items-center gap-2">
+                    <div class={move || {
+                        if send_action.pending().get() {
+                            "w-2 h-2 rounded-full bg-[#00d4aa] animate-pulse"
+                        } else {
+                            "w-2 h-2 rounded-full bg-[#00d4aa]"
+                        }
+                    }}></div>
+                    <span class="text-[#6b7d95] text-xs uppercase tracking-wider">
+                        {move || {
+                            if send_action.pending().get() {
+                                "Thinking..."
+                            } else {
+                                "Ready"
+                            }
+                        }}
+                    </span>
+                </div>
+            </header>
+
+            // Messages area
+            <div class="flex-1 overflow-y-auto px-4 py-6 space-y-4" id="chat-messages">
+                // Empty state
+                <Show when=move || messages.get().is_empty() && !send_action.pending().get()>
+                    <div class="flex flex-col items-center justify-center h-full text-center py-20">
+                        <div class="w-16 h-16 bg-[#1a2332] rounded-2xl flex items-center justify-center mb-6 border border-[#2a3a4c]">
+                            <span class="text-[#00d4aa] text-2xl">"*"</span>
                         </div>
-                        <p class="text-[#8b9cb8] text-sm">
-                            "Powered by Fermyon Spin + Leptos + WASM"
+                        <h2 class="text-white text-xl font-medium mb-2">
+                            "Start a conversation"
+                        </h2>
+                        <p class="text-[#6b7d95] text-sm max-w-md">
+                            "Ask me anything. I'm an AI agent powered by the Antigravity SDK, "
+                            "running server-side as a WASI component on Fermyon Spin."
                         </p>
                     </div>
+                </Show>
 
-                    // Counter Display
-                    <div class="relative">
-                        <div class="bg-[#1a2332] rounded-lg p-8 border border-[#3a4a5c]">
-                            <div class="text-5xl md:text-6xl font-light text-white tabular-nums">
-                                {move || {
-                                    optimistic_count.get()
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "...".to_string())
-                                }}
+                // Message bubbles
+                <For
+                    each=move || messages.get()
+                    key=|msg| format!("{}-{}", msg.role, msg.timestamp)
+                    let:msg
+                >
+                    {
+                        let is_user = msg.role == "user";
+                        let content = msg.content.clone();
+                        view! {
+                            <div class={if is_user {
+                                "flex justify-end"
+                            } else {
+                                "flex justify-start"
+                            }}>
+                                <div class={if is_user {
+                                    "max-w-[75%] bg-[#00d4aa] text-[#0f1720] rounded-2xl rounded-br-md px-4 py-3 text-sm leading-relaxed"
+                                } else {
+                                    "max-w-[75%] bg-[#1a2332] text-[#e1e8f0] rounded-2xl rounded-bl-md px-4 py-3 text-sm leading-relaxed border border-[#2a3a4c]"
+                                }}>
+                                    <pre class="whitespace-pre-wrap font-sans m-0">{content}</pre>
+                                </div>
                             </div>
-                            <div class="text-[#8b9cb8] text-sm mt-2 uppercase tracking-wider">
-                                "Count Value"
+                        }
+                    }
+                </For>
+
+                // Thinking indicator
+                <Show when=move || send_action.pending().get()>
+                    <div class="flex justify-start">
+                        <div class="bg-[#1a2332] text-[#6b7d95] rounded-2xl rounded-bl-md px-4 py-3 text-sm border border-[#2a3a4c] flex items-center gap-2">
+                            <div class="flex gap-1">
+                                <div class="w-1.5 h-1.5 bg-[#00d4aa] rounded-full animate-bounce" style="animation-delay: 0ms"></div>
+                                <div class="w-1.5 h-1.5 bg-[#00d4aa] rounded-full animate-bounce" style="animation-delay: 150ms"></div>
+                                <div class="w-1.5 h-1.5 bg-[#00d4aa] rounded-full animate-bounce" style="animation-delay: 300ms"></div>
                             </div>
+                            <span>"Agent is thinking..."</span>
                         </div>
-
-                        // Loading indicator overlay
-                        <Show when=move || increment_action.pending().get()>
-                            <div class="absolute inset-0 flex items-center justify-center bg-[#1a2332]/50 rounded-lg">
-                                <div class="animate-spin rounded-full h-8 w-8 border-2 border-transparent border-t-[#00d4aa]"></div>
-                            </div>
-                        </Show>
                     </div>
+                </Show>
+            </div>
 
-                    // Button
+            // Input area
+            <div class="bg-[#1a2332] border-t border-[#2a3a4c] px-4 py-4 shrink-0">
+                <div class="max-w-3xl mx-auto flex gap-3">
+                    <textarea
+                        prop:value=move || input_text.get()
+                        on:input=move |ev| set_input_text.set(event_target_value(&ev))
+                        on:keydown=on_keydown
+                        disabled=move || send_action.pending().get()
+                        placeholder="Type a message..."
+                        rows="1"
+                        class="flex-1 bg-[#0f1720] text-white placeholder-[#4a5a6c] border border-[#2a3a4c] rounded-xl px-4 py-3 text-sm resize-none focus:outline-none focus:border-[#00d4aa] focus:ring-1 focus:ring-[#00d4aa]/30 transition-colors disabled:opacity-50"
+                    ></textarea>
                     <button
-                        on:click=on_click
-                        disabled=move || increment_action.pending().get()
-                        class="w-full rounded-lg bg-[#00d4aa] px-6 py-3 text-[#1a2332] font-medium transition-all duration-200 hover:bg-[#00b894] active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#00d4aa]"
+                        on:click=on_send
+                        disabled=move || send_action.pending().get() || input_text.get().trim().is_empty()
+                        class="bg-[#00d4aa] text-[#0f1720] font-medium px-5 py-3 rounded-xl transition-all duration-200 hover:bg-[#00b894] active:scale-[0.97] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#00d4aa] text-sm shrink-0"
                     >
-                        {move || if increment_action.pending().get() {
-                            "Updating..."
+                        {move || if send_action.pending().get() {
+                            "..."
                         } else {
-                            "Increment Counter"
+                            "Send"
                         }}
                     </button>
-
-                    // Status indicators
-                    <div class="flex items-center justify-center gap-2 text-xs">
-                        <div class={move || {
-                            if optimistic_count.get().is_none() {
-                                "w-2 h-2 rounded-full bg-yellow-500 animate-pulse"
-                            } else if increment_action.pending().get() {
-                                "w-2 h-2 rounded-full bg-[#00d4aa] animate-pulse"
-                            } else {
-                                "w-2 h-2 rounded-full bg-[#00d4aa]"
-                            }
-                        }}>
-                        </div>
-                        <span class="text-[#8b9cb8] uppercase tracking-wider">
-                            {move || {
-                                if optimistic_count.get().is_none() {
-                                    "Loading"
-                                } else if increment_action.pending().get() {
-                                    "Syncing"
-                                } else {
-                                    "Ready"
-                                }
-                            }}
-                        </span>
-                    </div>
-
-                    // Footer info
-                    <div class="pt-4 border-t border-[#3a4a5c]">
-                        <p class="text-[#8b9cb8] text-xs">
-                            "Running on Fermyon Cloud"
-                        </p>
-                    </div>
                 </div>
+                <p class="text-center text-[#3a4a5c] text-xs mt-2">
+                    "Press Enter to send · Shift+Enter for new line"
+                </p>
             </div>
         </div>
     }
@@ -236,60 +257,86 @@ fn HomePage() -> impl IntoView {
 /// 404 - Not Found
 #[component]
 fn NotFound() -> impl IntoView {
-    // set an HTTP status code 404
-    // this is feature gated because it can only be done during
-    // initial server-side rendering
-    // if you navigate to the 404 page subsequently, the status
-    // code will not be set because there is not a new HTTP request
-    // to the server
     #[cfg(feature = "ssr")]
     {
-        // this can be done inline because it's synchronous
-        // if it were async, we'd use a server function
         if let Some(resp) = use_context::<leptos_wasi::response::ResponseOptions>() {
             resp.set_status(leptos_wasi::prelude::StatusCode::NOT_FOUND);
         }
     }
 
-    view! { <h1>"Not Found"</h1> }
+    view! { <h1 class="text-white text-center py-20 text-2xl">"Not Found"</h1> }
 }
 
-#[server(prefix = "/api")]
-pub async fn get_count() -> Result<u32, ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
-    match store.get_json::<u32>("spin_counter_count") {
-        Ok(Some(count)) => {
-            println!("Retrieved count: {count}");
-            Ok(count)
-        }
-        Ok(None) => {
-            println!("No count found, returning 0");
-            Ok(0)
-        }
-        Err(e) => {
-            eprintln!("Error retrieving count: {e}");
-            Ok(0)
-        }
-    }
-}
+// ── Server Functions ────────────────────────────────────────────────────────
 
+/// Send a message to the AI agent and get a response.
 #[server(prefix = "/api")]
-pub async fn increment_count() -> Result<(), ServerFnError<String>> {
-    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
+pub async fn send_message(message: String) -> Result<ChatMessage, ServerFnError<String>> {
+    use antigravity_sdk_rust::agent::{Agent, AgentConfig};
+    use antigravity_sdk_rust::policy;
 
-    // Get current count
-    let current_count = match store.get_json::<u32>("spin_counter_count") {
-        Ok(Some(count)) => count,
-        Ok(None) => 0,
-        Err(_) => 0,
+    // Create a minimal agent with only read-only capabilities
+    let mut config = AgentConfig::default();
+    config.policies = Some(vec![policy::allow_all()]);
+
+    // Disable all write tools for safety in the web chat context
+    config.capabilities.enabled_tools = Some(vec![]);
+
+    let mut agent = Agent::new(config);
+    agent.start().await.map_err(|e| e.to_string())?;
+
+    let response = agent.chat(&message).await.map_err(|e| e.to_string())?;
+
+    agent.stop().await.map_err(|e| e.to_string())?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let assistant_msg = ChatMessage {
+        role: "assistant".to_string(),
+        content: response.text,
+        timestamp: now,
     };
 
-    let new_count = current_count + 1;
-    println!("Incrementing count from {current_count} to {new_count}");
+    // Persist messages to KV store
+    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
 
+    // Load existing messages
+    let mut messages: Vec<ChatMessage> = match store.get_json::<Vec<ChatMessage>>("chat_messages") {
+        Ok(Some(msgs)) => msgs,
+        _ => Vec::new(),
+    };
+
+    // Add user message
+    messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: message,
+        timestamp: now.saturating_sub(1), // Slightly before assistant
+    });
+
+    // Add assistant message
+    messages.push(assistant_msg.clone());
+
+    // Save back
     store
-        .set_json("spin_counter_count", &new_count)
+        .set_json("chat_messages", &messages)
         .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
-    Ok(())
+    Ok(assistant_msg)
+}
+
+/// Get all chat messages from the KV store.
+#[server(prefix = "/api")]
+pub async fn get_messages() -> Result<Vec<ChatMessage>, ServerFnError<String>> {
+    let store = spin_sdk::key_value::Store::open_default().map_err(|e| e.to_string())?;
+    match store.get_json::<Vec<ChatMessage>>("chat_messages") {
+        Ok(Some(msgs)) => Ok(msgs),
+        Ok(None) => Ok(Vec::new()),
+        Err(e) => {
+            eprintln!("Error loading messages: {e}");
+            Ok(Vec::new())
+        }
+    }
 }

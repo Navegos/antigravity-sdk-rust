@@ -4,7 +4,10 @@ spin_manifest_version = 2
 name = "leptos-ssr-axum"
 version = "0.1.0"
 authors = ["codeitlikemiley <codeitlikemiley@gmail.com>"]
-description = "Antigravity SDK Spin WASI Example"
+description = "Antigravity SDK Chat Interface — Leptos + Spin WASI Example"
+
+[variables]
+gemini_api_key = { required = true, secret = true }
 
 [[trigger.http]]
 route = "/..."
@@ -12,8 +15,9 @@ component = "leptos-ssr-axum"
 
 [component.leptos-ssr-axum]
 source = "target/wasm32-wasip1/release/leptos_ssr_axum.wasm"
-allowed_outbound_hosts = []
+allowed_outbound_hosts = ["http://127.0.0.1:8000"]
 key_value_stores = ["default"]
+environment = { GEMINI_API_KEY = "{{ gemini_api_key }}" }
 [component.leptos-ssr-axum.build]
 command = "cargo leptos build --release && LEPTOS_OUTPUT_NAME=leptos_ssr_axum cargo build --lib --target wasm32-wasip1 --release --no-default-features --features ssr"
 watch = ["src/**/*.rs", "Cargo.toml"]

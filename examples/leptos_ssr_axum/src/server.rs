@@ -7,14 +7,12 @@ use leptos_wasi::{
 use wasi::exports::http::incoming_handler::Guest;
 use wasi::http::proxy::export;
 
-use crate::app::{shell, App, GetCount, IncrementCount};
+use crate::app::{shell, App, GetMessages, SendMessage};
 
 struct LeptosServer;
 
 impl Guest for LeptosServer {
     fn handle(request: IncomingRequest, response_out: ResponseOutparam) {
-        // Initiate a single-threaded [`Future`] Executor so we can run the
-        // rendering system and take advantage of bodies streaming.
         let executor = WasiExecutor::new(leptos_wasi::executor::Mode::Stalled);
         if let Err(e) = LeptosExecutor::init_local_custom_executor(executor.clone()) {
             eprintln!("Got error while initializing leptos_wasi executor: {e:?}");
@@ -38,12 +36,9 @@ async fn handle_request(
     let leptos_options = conf.leptos_options;
 
     Handler::build(request, response_out)?
-        // NOTE: Add all server functions here to ensure functionality works as expected!
-        .with_server_fn::<GetCount, _>()
-        .with_server_fn::<IncrementCount, _>()
-        // Fetch all available routes from your App.
+        .with_server_fn::<SendMessage, _>()
+        .with_server_fn::<GetMessages, _>()
         .generate_routes(App)
-        // Actually process the request and write the response.
         .handle_with_context(move || shell(leptos_options.clone()), || {})
         .await?;
     Ok(())
