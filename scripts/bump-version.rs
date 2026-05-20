@@ -116,13 +116,9 @@ fn main() {
     });
     println!("Updated Cargo.toml successfully.");
 
-    // 4. Update Cargo.lock by running cargo check
-    println!("Running 'cargo check' to update Cargo.lock...");
-    run_command("cargo", &["check"]);
-
-    // 5. Git commit and tag
+    // 4. Git commit and tag
     println!("Staging version changes...");
-    run_command("git", &["add", "Cargo.toml", "Cargo.lock"]);
+    run_command("git", &["add", "Cargo.toml"]);
 
     let commit_msg = format!("chore: bump version to {}", target_version);
     println!("Committing changes (excluding git hooks with --no-verify)...");
