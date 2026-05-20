@@ -388,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn test_allow_creates_approve_policy() {
+    fn test_allow_approve_policy() {
         let p = allow("read_file").with_name("allow-read");
         assert_eq!(p.tool, "read_file");
         assert_eq!(p.decision, Decision::Approve);
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deny_creates_deny_policy() {
+    fn test_deny_policy() {
         let p = deny("run_command").with_name("block-cmd");
         assert_eq!(p.tool, "run_command");
         assert_eq!(p.decision, Decision::Deny);
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ask_user_creates_ask_user_policy() {
+    fn test_ask_user_policy() {
         let p = ask_user("run_command", |_| true).with_name("confirm-cmd");
         assert_eq!(p.decision, Decision::AskUser);
         assert!(p.ask_user.is_some());
