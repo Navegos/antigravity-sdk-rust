@@ -345,6 +345,9 @@ async fn build_session(
             },
             image_generation: ModelEntry::default(),
         },
+        enable_google_search: Some(true),
+        enable_url_context: Some(true),
+        ..Default::default()
     };
     let agent: Agent<Started> = base
         .app_data_dir(&config.app_data_dir)
@@ -525,6 +528,7 @@ async fn chat_stream_handler(
                                 let _ = tx.send(Ok(sse_event("thought", serde_json::json!({
                                     "step_index": step_index,
                                     "text": step.thinking_delta,
+                                    "trajectory_id": &trajectory_id,
                                 })))).await;
                             }
 
@@ -533,6 +537,7 @@ async fn chat_stream_handler(
                                 let _ = tx.send(Ok(sse_event("token", serde_json::json!({
                                     "step_index": step_index,
                                     "text": step.content_delta,
+                                    "trajectory_id": &trajectory_id,
                                 })))).await;
                             }
 
@@ -554,6 +559,7 @@ async fn chat_stream_handler(
                                                 // step.content is the human-readable label
                                                 // the agent sets for this action (e.g. "Change Directory").
                                                 "label":          step.content,
+                                                "trajectory_id":  &trajectory_id,
                                             })))).await;
                                         }
                                     } else if step.status == StepStatus::Done
@@ -588,6 +594,7 @@ async fn chat_stream_handler(
                                             "result":         result_val,
                                             "error":          error_val,
                                             "canonical_path": call.canonical_path,
+                                            "trajectory_id":  &trajectory_id,
                                         })))).await;
                                     }
                                 }
@@ -607,6 +614,7 @@ async fn chat_stream_handler(
                             if step.r#type == StepType::Compaction {
                                 let _ = tx.send(Ok(sse_event("compaction", serde_json::json!({
                                     "step_index": step_index,
+                                    "trajectory_id": &trajectory_id,
                                 })))).await;
                             }
 
@@ -615,6 +623,7 @@ async fn chat_stream_handler(
                                 let _ = tx.send(Ok(sse_event("finish", serde_json::json!({
                                     "structured_output": step.structured_output,
                                     "text": step.content,
+                                    "trajectory_id": &trajectory_id,
                                 })))).await;
                             }
 
@@ -631,6 +640,7 @@ async fn chat_stream_handler(
                                 let _ = tx.send(Ok(sse_event("status", serde_json::json!({
                                     "step_index": step_index,
                                     "status":     status,
+                                    "trajectory_id": &trajectory_id,
                                 })))).await;
                             }
 

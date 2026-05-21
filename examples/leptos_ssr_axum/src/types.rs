@@ -22,6 +22,10 @@ pub enum MessageBlock {
         #[serde(default)]
         label: Option<String>,
         status: ToolCallStatus,
+        #[serde(default)]
+        subagent_trajectory_id: Option<String>,
+        #[serde(default)]
+        subagent_blocks: Vec<MessageBlock>,
     },
 
     /// A tool result (after invocation completes)
@@ -78,6 +82,24 @@ pub enum MessageBlock {
         message: String,
         http_code: Option<u32>,
     },
+}
+
+impl MessageBlock {
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::UserMessage { id, .. } |
+            Self::Thinking { id, .. } |
+            Self::ToolCall { id, .. } |
+            Self::ToolResult { id, .. } |
+            Self::AssistantMessage { id, .. } |
+            Self::Question { id, .. } |
+            Self::Confirmation { id, .. } |
+            Self::Compaction { id, .. } |
+            Self::UsageSummary { id, .. } |
+            Self::Finish { id, .. } |
+            Self::Error { id, .. } => *id,
+        }
+    }
 }
 
 /// Status of a tool call block.

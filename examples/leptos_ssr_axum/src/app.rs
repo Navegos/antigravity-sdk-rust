@@ -182,11 +182,15 @@ fn shorten_path(path: &str) -> String {
 /// The `label` comes from the agent's step description (e.g. "Change Directory").
 #[component]
 fn ToolCallView(
+    id: u64,
+    call_id: String,
     name: String,
     args: serde_json::Value,
     status: ToolCallStatus,
     canonical_path: Option<String>,
     label: Option<String>,
+    subagent_blocks: Vec<MessageBlock>,
+    on_answer: Callback<(u64, Vec<QuestionResponse>, bool)>,
 ) -> impl IntoView {
     let args_str = serde_json::to_string_pretty(&args).unwrap_or_else(|_| args.to_string());
 
@@ -247,8 +251,16 @@ fn ToolCallView(
     };
     let name_chip = name.clone();
 
-    // Contextual subtitle: path (for file tools) or command (for RUN_COMMAND)
-    let subtitle = if let Some(ref path) = canonical_path {
+    // Contextual subtitle: query (for SEARCH_DIR), command (for RUN_COMMAND), or path (for file tools)
+    let subtitle = if name == "SEARCH_DIR" {
+        // Prefer showing the search query — more informative than the directory path
+        let query = args.get("query")
+            .and_then(|v| v.as_str())
+            .map(|s| if s.len() > 40 { format!("\"{}…\"", &s[..40]) } else { format!("\"{}\"", s) });
+        if let Some(q_str) = query {
+            view! { <span class="font-mono text-[10px] opacity-60 truncate max-w-[220px]">{q_str}</span> }.into_any()
+        } else { ().into_any() }
+    } else if let Some(ref path) = canonical_path {
         let short = shorten_path(path);
         view! {
             <span class="font-mono text-[10px] opacity-70 truncate max-w-[220px]" title=path.clone()>
@@ -301,6 +313,30 @@ fn ToolCallView(
                 <div class="text-[10px] text-gray-400 dark:text-gray-500 mb-1.5 font-semibold uppercase tracking-wider">"Arguments:"</div>
                 <pre class="whitespace-pre overflow-x-auto leading-relaxed text-gray-700 dark:text-gray-300">{args_str}</pre>
             </div>
+
+            // Subagent trajectory container (nested timelines)
+            {if !subagent_blocks.is_empty() {
+                let sub_blocks = subagent_blocks.clone();
+                let on_answer_cb = on_answer.clone();
+                view! {
+                    <div class="px-3 pb-3 border-t border-gray-200/40 dark:border-gray-800/30 bg-white/5">
+                        <div class="mt-3 pl-3 border-l border-dashed border-gray-300 dark:border-zinc-700/60 space-y-3">
+                            <div class="text-[10px] text-gray-400 dark:text-zinc-500 font-semibold uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                                <span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
+                                "Subagent Trajectory"
+                            </div>
+                            {sub_blocks.into_iter().map(|block| {
+                                let cb = on_answer_cb.clone();
+                                view! {
+                                    <MessageBlockView block=block on_answer=cb />
+                                }
+                            }).collect::<Vec<_>>()}
+                        </div>
+                    </div>
+                }.into_any()
+            } else {
+                ().into_any()
+            }}
         </details>
     }
 }
@@ -366,6 +402,12 @@ fn ToolResultView(
             } else {
                 format!("{}{}", output.trim_end(), exit_code)
             }
+        } else if name == "SEARCH_DIR" {
+            // output is the grep results text from the harness, packed into args.output
+            res.get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no results)")
+                .to_string()
         } else if name == "VIEW_FILE" {
             res.get("content")
                 .or_else(|| res.get("Content"))
@@ -793,6 +835,125 @@ fn FinishBlockView(structured_output: Option<serde_json::Value>) -> impl IntoVie
     }
 }
 
+
+#[derive(Clone, PartialEq, Debug)]
+struct SubagentInfo {
+    trajectory_id: String,
+    prompt: String,
+    status: ToolCallStatus,
+    step_count: usize,
+    error: Option<String>,
+    subagents: Vec<SubagentInfo>,
+}
+
+fn collect_subagents_recursive(blocks: &[MessageBlock]) -> Vec<SubagentInfo> {
+    let mut result = Vec::new();
+    for block in blocks {
+        if let MessageBlock::ToolCall {
+            name,
+            args,
+            status,
+            subagent_trajectory_id,
+            subagent_blocks,
+            ..
+        } = block {
+            if name == "START_SUBAGENT" {
+                if let Some(ref traj_id) = subagent_trajectory_id {
+                    let prompt = args["prompt"].as_str().unwrap_or("Unknown Subagent").to_string();
+                    
+                    let mut step_count = 0;
+                    let mut error = None;
+                    for sb in subagent_blocks {
+                        match sb {
+                            MessageBlock::Thinking { .. } | MessageBlock::AssistantMessage { .. } => {
+                                step_count += 1;
+                            }
+                            MessageBlock::Error { message, .. } => {
+                                error = Some(message.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let children = collect_subagents_recursive(subagent_blocks);
+                    
+                    result.push(SubagentInfo {
+                        trajectory_id: traj_id.clone(),
+                        prompt,
+                        status: status.clone(),
+                        step_count,
+                        error,
+                        subagents: children,
+                    });
+                }
+            } else {
+                result.extend(collect_subagents_recursive(subagent_blocks));
+            }
+        }
+    }
+    result
+}
+
+#[component]
+fn SubagentStatusItem(item: SubagentInfo, depth: usize) -> AnyView {
+    let status_class = match item.status {
+        ToolCallStatus::Running => "bg-blue-500/20 text-blue-400 border-blue-500/30",
+        ToolCallStatus::Done => "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
+        ToolCallStatus::Error => "bg-rose-500/20 text-rose-400 border-rose-500/30",
+    };
+    
+    let status_text = match item.status {
+        ToolCallStatus::Running => "RUNNING",
+        ToolCallStatus::Done => "COMPLETED",
+        ToolCallStatus::Error => "FAILED",
+    };
+
+    let error_view = item.error.map(|err| {
+        view! {
+            <div class="mt-1.5 text-xs text-rose-400 bg-rose-500/10 border border-rose-500/20 rounded p-1.5 font-mono break-all">
+                {err}
+            </div>
+        }
+    });
+
+    view! {
+        <div class="flex flex-col space-y-1.5" style=format!("padding-left: {}px", depth * 12)>
+            <div class="p-3 rounded-lg border border-gray-200/10 bg-white/5 dark:bg-[#202020]/40 backdrop-blur-md shadow-sm transition-all duration-300 hover:border-gray-200/20">
+                <div class="flex items-start justify-between gap-2">
+                    <div class="flex flex-col min-w-0">
+                        <span class="text-[10px] text-gray-500 font-mono tracking-wider">
+                            {item.trajectory_id}
+                        </span>
+                        <span class="text-xs text-gray-800 dark:text-gray-200 font-medium truncate mt-0.5 max-w-[200px]">
+                            {item.prompt}
+                        </span>
+                    </div>
+                    <span class=format!("text-[8px] font-bold px-1.5 py-0.5 rounded border tracking-wider {}", status_class)>
+                        {status_text}
+                    </span>
+                </div>
+                
+                <div class="flex items-center gap-3 mt-2 text-[10px] text-gray-500 font-medium">
+                    <div class="flex items-center gap-1">
+                        <svg class="w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2" />
+                        </svg>
+                        <span>{item.step_count} " steps"</span>
+                    </div>
+                </div>
+
+                {error_view}
+            </div>
+
+            {item.subagents.into_iter().map(|child| {
+                view! {
+                    <SubagentStatusItem item=child depth=depth + 1 />
+                }
+            }).collect::<Vec<_>>()}
+        </div>
+    }.into_any()
+}
+
 /// Top-level Block Dispatcher. Renders the appropriate component based on MessageBlock variant.
 #[component]
 fn MessageBlockView(
@@ -809,8 +970,31 @@ fn MessageBlockView(
         MessageBlock::Thinking { content, is_streaming, .. } => {
             view! { <ThinkingView content is_streaming /> }.into_any()
         }
-        MessageBlock::ToolCall { name, args, status, canonical_path, label, .. } => {
-            view! { <ToolCallView name args status canonical_path label /> }.into_any()
+        MessageBlock::ToolCall {
+            id,
+            call_id,
+            name,
+            args,
+            status,
+            canonical_path,
+            label,
+            subagent_blocks,
+            ..
+        } => {
+            let on_answer_cb = on_answer.clone();
+            view! {
+                <ToolCallView
+                    id=id
+                    call_id=call_id
+                    name=name
+                    args=args
+                    status=status
+                    canonical_path=canonical_path
+                    label=label
+                    subagent_blocks=subagent_blocks
+                    on_answer=on_answer_cb
+                />
+            }.into_any()
         }
         MessageBlock::ToolResult { name, result, error, .. } => {
             view! { <ToolResultView name result error /> }.into_any()
@@ -870,6 +1054,8 @@ fn get_current_time() -> u64 {
 struct TokenEvent {
     step_index: u32,
     text: String,
+    #[serde(default)]
+    trajectory_id: Option<String>,
 }
 
 #[cfg(feature = "hydrate")]
@@ -877,6 +1063,8 @@ struct TokenEvent {
 struct ThoughtEvent {
     step_index: u32,
     text: String,
+    #[serde(default)]
+    trajectory_id: Option<String>,
 }
 
 #[cfg(feature = "hydrate")]
@@ -885,6 +1073,8 @@ struct ThoughtEvent {
 struct StatusEvent {
     step_index: u32,
     status: String,
+    #[serde(default)]
+    trajectory_id: Option<String>,
 }
 
 #[cfg(feature = "hydrate")]
@@ -897,6 +1087,8 @@ struct ToolStartEvent {
     /// Human-readable label from the agent's step description.
     #[serde(default)]
     label: Option<String>,
+    #[serde(default)]
+    trajectory_id: Option<String>,
 }
 
 #[cfg(feature = "hydrate")]
@@ -906,6 +1098,8 @@ struct ToolResultEvent {
     name: String,
     result: Option<serde_json::Value>,
     error: Option<String>,
+    #[serde(default)]
+    trajectory_id: Option<String>,
 }
 
 #[cfg(feature = "hydrate")]
@@ -939,12 +1133,16 @@ struct UsageEvent {
 #[derive(serde::Deserialize)]
 struct CompactionEvent {
     step_index: u32,
+    #[serde(default)]
+    trajectory_id: Option<String>,
 }
 
 #[cfg(feature = "hydrate")]
 #[derive(serde::Deserialize)]
 struct FinishEvent {
     structured_output: Option<serde_json::Value>,
+    #[serde(default)]
+    trajectory_id: Option<String>,
 }
 
 #[cfg(feature = "hydrate")]
@@ -975,6 +1173,140 @@ fn update_streaming_block<F>(
     }
 }
 
+#[cfg(feature = "hydrate")]
+struct SubagentStreamState {
+    streaming_assistant_id: Option<u64>,
+    streaming_thinking_id: Option<u64>,
+    current_text_step: u32,
+    current_think_step: u32,
+    seen_tool_ids: std::collections::HashSet<String>,
+}
+
+#[cfg(feature = "hydrate")]
+impl Default for SubagentStreamState {
+    fn default() -> Self {
+        Self {
+            streaming_assistant_id: None,
+            streaming_thinking_id: None,
+            current_text_step: u32::MAX,
+            current_think_step: u32::MAX,
+            seen_tool_ids: std::collections::HashSet::new(),
+        }
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn find_and_associate_subagent(blocks: &mut Vec<MessageBlock>, traj_id: &str) -> bool {
+    for block in blocks.iter_mut().rev() {
+        if let MessageBlock::ToolCall {
+            name,
+            subagent_trajectory_id,
+            subagent_blocks,
+            ..
+        } = block {
+            if find_and_associate_subagent(subagent_blocks, traj_id) {
+                return true;
+            }
+            if name == "START_SUBAGENT" && subagent_trajectory_id.is_none() {
+                *subagent_trajectory_id = Some(traj_id.to_string());
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(feature = "hydrate")]
+fn update_subagent_blocks_impl(
+    blocks: &mut Vec<MessageBlock>,
+    traj_id: &str,
+    f: &mut dyn FnMut(&mut Vec<MessageBlock>),
+) -> bool {
+    for block in blocks.iter_mut() {
+        if let MessageBlock::ToolCall {
+            subagent_trajectory_id,
+            subagent_blocks,
+            ..
+        } = block {
+            if let Some(ref tid) = subagent_trajectory_id {
+                if tid == traj_id {
+                    f(subagent_blocks);
+                    return true;
+                }
+            }
+            if update_subagent_blocks_impl(subagent_blocks, traj_id, f) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(feature = "hydrate")]
+fn update_subagent_blocks<F>(blocks: &mut Vec<MessageBlock>, traj_id: &str, mut f: F) -> bool
+where
+    F: FnMut(&mut Vec<MessageBlock>),
+{
+    update_subagent_blocks_impl(blocks, traj_id, &mut f)
+}
+
+#[cfg(feature = "hydrate")]
+fn ensure_and_update_subagent_blocks_impl(
+    blocks: &mut Vec<MessageBlock>,
+    traj_id: &str,
+    f: &mut dyn FnMut(&mut Vec<MessageBlock>),
+) {
+    let updated = update_subagent_blocks_impl(blocks, traj_id, f);
+    if !updated {
+        if find_and_associate_subagent(blocks, traj_id) {
+            update_subagent_blocks_impl(blocks, traj_id, f);
+        }
+    }
+}
+
+#[cfg(feature = "hydrate")]
+fn ensure_and_update_subagent_blocks<F>(blocks: &mut Vec<MessageBlock>, traj_id: &str, mut f: F)
+where
+    F: FnMut(&mut Vec<MessageBlock>),
+{
+    ensure_and_update_subagent_blocks_impl(blocks, traj_id, &mut f);
+}
+
+#[cfg(feature = "hydrate")]
+fn update_block_by_id_impl(
+    blocks: &mut Vec<MessageBlock>,
+    id: u64,
+    f: &mut dyn FnMut(&mut MessageBlock),
+) -> bool {
+    for block in blocks.iter_mut() {
+        if block.id() == id {
+            f(block);
+            return true;
+        }
+        if let MessageBlock::ToolCall { subagent_blocks, .. } = block {
+            if update_block_by_id_impl(subagent_blocks, id, f) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(feature = "hydrate")]
+fn mark_all_thinking_done(blocks: &mut [MessageBlock]) {
+    for block in blocks {
+        match block {
+            MessageBlock::Thinking { is_streaming, .. } => {
+                *is_streaming = false;
+            }
+            MessageBlock::ToolCall { subagent_blocks, .. } => {
+                mark_all_thinking_done(subagent_blocks);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Chat page component
 #[component]
 fn ChatPage() -> impl IntoView {
@@ -993,9 +1325,9 @@ fn ChatPage() -> impl IntoView {
     let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
     let messages_container_ref = NodeRef::<leptos::html::Div>::new();
 
-    // Theme and Sidebar layout signals
     let (dark_mode, set_dark_mode) = signal(true);
     let (sidebar_open, set_sidebar_open) = signal(false);
+    let (hub_open, set_hub_open) = signal(false);
 
     // Monotonic block ID counter
     let (block_id_counter, set_block_id_counter) = signal(0u64);
@@ -1518,34 +1850,86 @@ fn ChatPage() -> impl IntoView {
                     use std::cell::Cell;
                     let stream_completed = Rc::new(Cell::new(false));
 
+                    let main_trajectory_id = Rc::new(std::cell::RefCell::new(Option::<String>::None));
+                    let subagents_state = Rc::new(std::cell::RefCell::new(std::collections::HashMap::<String, SubagentStreamState>::new()));
+
                     // Event handlers
                     let on_token = {
+                        let main_trajectory_id = main_trajectory_id.clone();
+                        let subagents_state = subagents_state.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
                                     if let Ok(data) = serde_json::from_str::<TokenEvent>(&data_str) {
-                                        // If this token belongs to a NEW step, start a fresh block.
-                                        if current_text_step.get() != data.step_index {
-                                            current_text_step.set(data.step_index);
-                                            streaming_assistant_id.set_value(None);
-                                        }
-                                        let mut id_opt = streaming_assistant_id.get_value();
-                                        if id_opt.is_none() {
-                                            let new_id = next_id();
-                                            set_blocks.update(|bs| bs.push(MessageBlock::AssistantMessage {
-                                                id: new_id,
-                                                content: String::new(),
-                                                timestamp: get_current_time(),
-                                            }));
-                                            streaming_assistant_id.set_value(Some(new_id));
-                                            id_opt = Some(new_id);
-                                        }
-                                        set_stream_text_buf.update(|s| s.push_str(&data.text));
-                                        update_streaming_block(set_blocks, id_opt, |b| {
-                                            if let MessageBlock::AssistantMessage { ref mut content, .. } = b {
-                                                content.push_str(&data.text);
+                                        let is_subagent = if let Some(ref traj_id) = data.trajectory_id {
+                                            let mut main_id_opt = main_trajectory_id.borrow().clone();
+                                            if main_id_opt.is_none() {
+                                                *main_trajectory_id.borrow_mut() = Some(traj_id.clone());
+                                                main_id_opt = Some(traj_id.clone());
                                             }
-                                        });
+                                            main_id_opt.as_ref() != Some(traj_id)
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_subagent {
+                                            let traj_id = data.trajectory_id.clone().unwrap();
+                                            let mut state_map = subagents_state.borrow_mut();
+                                            let sub_state = state_map.entry(traj_id.clone()).or_default();
+                                            
+                                            if sub_state.current_text_step != data.step_index {
+                                                sub_state.current_text_step = data.step_index;
+                                                sub_state.streaming_assistant_id = None;
+                                            }
+                                            let mut id_opt = sub_state.streaming_assistant_id;
+                                            if id_opt.is_none() {
+                                                let new_id = next_id();
+                                                sub_state.streaming_assistant_id = Some(new_id);
+                                                id_opt = Some(new_id);
+                                                set_blocks.update(|bs| {
+                                                    ensure_and_update_subagent_blocks(bs, &traj_id, move |sub_blocks| {
+                                                        sub_blocks.push(MessageBlock::AssistantMessage {
+                                                            id: new_id,
+                                                            content: String::new(),
+                                                            timestamp: get_current_time(),
+                                                        });
+                                                    });
+                                                });
+                                            }
+                                            
+                                            let target_id = id_opt.unwrap();
+                                            let text_to_push = data.text.clone();
+                                            set_blocks.update(|bs| {
+                                                update_block_by_id_impl(bs, target_id, &mut |b| {
+                                                    if let MessageBlock::AssistantMessage { ref mut content, .. } = b {
+                                                        content.push_str(&text_to_push);
+                                                    }
+                                                });
+                                            });
+                                        } else {
+                                            // If this token belongs to a NEW step, start a fresh block.
+                                            if current_text_step.get() != data.step_index {
+                                                current_text_step.set(data.step_index);
+                                                streaming_assistant_id.set_value(None);
+                                            }
+                                            let mut id_opt = streaming_assistant_id.get_value();
+                                            if id_opt.is_none() {
+                                                let new_id = next_id();
+                                                set_blocks.update(|bs| bs.push(MessageBlock::AssistantMessage {
+                                                    id: new_id,
+                                                    content: String::new(),
+                                                    timestamp: get_current_time(),
+                                                }));
+                                                streaming_assistant_id.set_value(Some(new_id));
+                                                id_opt = Some(new_id);
+                                            }
+                                            set_stream_text_buf.update(|s| s.push_str(&data.text));
+                                            update_streaming_block(set_blocks, id_opt, |b| {
+                                                if let MessageBlock::AssistantMessage { ref mut content, .. } = b {
+                                                    content.push_str(&data.text);
+                                                }
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -1553,112 +1937,296 @@ fn ChatPage() -> impl IntoView {
                     };
 
                     let on_thought = {
+                        let main_trajectory_id = main_trajectory_id.clone();
+                        let subagents_state = subagents_state.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
                                     if let Ok(data) = serde_json::from_str::<ThoughtEvent>(&data_str) {
-                                        // If this thought belongs to a NEW step, start a fresh block.
-                                        if current_think_step.get() != data.step_index {
-                                            current_think_step.set(data.step_index);
-                                            streaming_thinking_id.set_value(None);
-                                        }
-                                        let mut id_opt = streaming_thinking_id.get_value();
-                                        if id_opt.is_none() {
-                                            let new_id = next_id();
-                                            set_blocks.update(|bs| bs.push(MessageBlock::Thinking {
-                                                id: new_id,
-                                                content: String::new(),
-                                                is_streaming: true,
-                                            }));
-                                            streaming_thinking_id.set_value(Some(new_id));
-                                            id_opt = Some(new_id);
-                                        }
-                                        set_stream_think_buf.update(|s| s.push_str(&data.text));
-                                        update_streaming_block(set_blocks, id_opt, |b| {
-                                            if let MessageBlock::Thinking { ref mut content, .. } = b {
-                                                content.push_str(&data.text);
+                                        let is_subagent = if let Some(ref traj_id) = data.trajectory_id {
+                                            let mut main_id_opt = main_trajectory_id.borrow().clone();
+                                            if main_id_opt.is_none() {
+                                                *main_trajectory_id.borrow_mut() = Some(traj_id.clone());
+                                                main_id_opt = Some(traj_id.clone());
                                             }
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    };
+                                            main_id_opt.as_ref() != Some(traj_id)
+                                        } else {
+                                            false
+                                        };
 
-                    let on_tool_start = move |event: &web_sys::Event| {
-                        if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
-                            if let Some(data_str) = msg_event.data().as_string() {
-                                if let Ok(data) = serde_json::from_str::<ToolStartEvent>(&data_str) {
-                                    // Belt-and-suspenders dedup: backend already deduplicates,
-                                    // but guard here too in case of reconnection replays.
-                                    let already_exists = blocks.get_untracked().iter().any(|b| match b {
-                                        MessageBlock::ToolCall { call_id, .. } => call_id == &data.id,
-                                        _ => false,
-                                    });
-                                    if !already_exists {
-                                        let id = next_id();
-                                        set_blocks.update(|bs| bs.push(MessageBlock::ToolCall {
-                                            id,
-                                            call_id: data.id.clone(),
-                                            name: data.name,
-                                            args: data.args,
-                                            canonical_path: data.canonical_path,
-                                            label: data.label,
-                                            status: ToolCallStatus::Running,
-                                        }));
-                                        set_stream_tool_id.set(Some(data.id));
-                                    }
-                                }
-                            }
-                        }
-                    };
-
-                    let on_tool_result = move |event: &web_sys::Event| {
-                        if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
-                            if let Some(data_str) = msg_event.data().as_string() {
-                                if let Ok(data) = serde_json::from_str::<ToolResultEvent>(&data_str) {
-                                    set_blocks.update(|bs| {
-                                        if let Some(MessageBlock::ToolCall { ref mut status, .. }) = bs.iter_mut().find(|b| match b {
-                                            MessageBlock::ToolCall { call_id, .. } => call_id == &data.id,
-                                            _ => false,
-                                        }) {
-                                            *status = if data.error.is_some() {
-                                                ToolCallStatus::Error
-                                            } else {
-                                                ToolCallStatus::Done
-                                            };
+                                        if is_subagent {
+                                            let traj_id = data.trajectory_id.clone().unwrap();
+                                            let mut state_map = subagents_state.borrow_mut();
+                                            let sub_state = state_map.entry(traj_id.clone()).or_default();
+                                            
+                                            if sub_state.current_think_step != data.step_index {
+                                                sub_state.current_think_step = data.step_index;
+                                                sub_state.streaming_thinking_id = None;
+                                            }
+                                            let mut id_opt = sub_state.streaming_thinking_id;
+                                            if id_opt.is_none() {
+                                                let new_id = next_id();
+                                                sub_state.streaming_thinking_id = Some(new_id);
+                                                id_opt = Some(new_id);
+                                                set_blocks.update(|bs| {
+                                                    ensure_and_update_subagent_blocks(bs, &traj_id, move |sub_blocks| {
+                                                        sub_blocks.push(MessageBlock::Thinking {
+                                                            id: new_id,
+                                                            content: String::new(),
+                                                            is_streaming: true,
+                                                        });
+                                                    });
+                                                });
+                                            }
+                                            
+                                            let target_id = id_opt.unwrap();
+                                            let text_to_push = data.text.clone();
+                                            set_blocks.update(|bs| {
+                                                update_block_by_id_impl(bs, target_id, &mut |b| {
+                                                    if let MessageBlock::Thinking { ref mut content, .. } = b {
+                                                        content.push_str(&text_to_push);
+                                                    }
+                                                });
+                                            });
+                                        } else {
+                                            // If this thought belongs to a NEW step, start a fresh block.
+                                            if current_think_step.get() != data.step_index {
+                                                current_think_step.set(data.step_index);
+                                                streaming_thinking_id.set_value(None);
+                                            }
+                                            let mut id_opt = streaming_thinking_id.get_value();
+                                            if id_opt.is_none() {
+                                                let new_id = next_id();
+                                                set_blocks.update(|bs| bs.push(MessageBlock::Thinking {
+                                                    id: new_id,
+                                                    content: String::new(),
+                                                    is_streaming: true,
+                                                }));
+                                                streaming_thinking_id.set_value(Some(new_id));
+                                                id_opt = Some(new_id);
+                                            }
+                                            set_stream_think_buf.update(|s| s.push_str(&data.text));
+                                            update_streaming_block(set_blocks, id_opt, |b| {
+                                                if let MessageBlock::Thinking { ref mut content, .. } = b {
+                                                    content.push_str(&data.text);
+                                                }
+                                            });
                                         }
-                                        let res_id = next_id();
-                                        bs.push(MessageBlock::ToolResult {
-                                            id: res_id,
-                                            call_id: data.id,
-                                            name: data.name,
-                                            result: data.result,
-                                            error: data.error,
-                                        });
-                                    });
-                                    set_stream_tool_id.set(None);
+                                    }
                                 }
                             }
                         }
                     };
 
-                    let on_question = move |event: &web_sys::Event| {
-                        if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
-                            if let Some(data_str) = msg_event.data().as_string() {
-                                if let Ok(data) = serde_json::from_str::<QuestionEvent>(&data_str) {
-                                    let id = next_id();
-                                    set_blocks.update(|bs| bs.push(MessageBlock::Question {
-                                        id,
-                                        trajectory_id: data.trajectory_id.clone(),
-                                        step_index: data.step_index,
-                                        questions: data.questions,
-                                        answered: false,
-                                    }));
-                                    set_pending_question.set(Some(PendingQuestion {
-                                        trajectory_id: data.trajectory_id,
-                                        step_index: data.step_index,
-                                    }));
+                    let on_tool_start = {
+                        let main_trajectory_id = main_trajectory_id.clone();
+                        let subagents_state = subagents_state.clone();
+                        move |event: &web_sys::Event| {
+                            if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
+                                if let Some(data_str) = msg_event.data().as_string() {
+                                    if let Ok(data) = serde_json::from_str::<ToolStartEvent>(&data_str) {
+                                        let is_subagent = if let Some(ref traj_id) = data.trajectory_id {
+                                            let mut main_id_opt = main_trajectory_id.borrow().clone();
+                                            if main_id_opt.is_none() {
+                                                *main_trajectory_id.borrow_mut() = Some(traj_id.clone());
+                                                main_id_opt = Some(traj_id.clone());
+                                            }
+                                            main_id_opt.as_ref() != Some(traj_id)
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_subagent {
+                                            let traj_id = data.trajectory_id.clone().unwrap();
+                                            let mut state_map = subagents_state.borrow_mut();
+                                            let sub_state = state_map.entry(traj_id.clone()).or_default();
+                                            
+                                            if !sub_state.seen_tool_ids.contains(&data.id) {
+                                                sub_state.seen_tool_ids.insert(data.id.clone());
+                                                let id = next_id();
+                                                let tool_id = data.id.clone();
+                                                let tool_name = data.name.clone();
+                                                let tool_args = data.args.clone();
+                                                let tool_canonical = data.canonical_path.clone();
+                                                let tool_label = data.label.clone();
+                                                
+                                                set_blocks.update(|bs| {
+                                                    ensure_and_update_subagent_blocks(bs, &traj_id, move |sub_blocks| {
+                                                        sub_blocks.push(MessageBlock::ToolCall {
+                                                            id,
+                                                            call_id: tool_id.clone(),
+                                                            name: tool_name.clone(),
+                                                            args: tool_args.clone(),
+                                                            canonical_path: tool_canonical.clone(),
+                                                            label: tool_label.clone(),
+                                                            status: ToolCallStatus::Running,
+                                                            subagent_trajectory_id: None,
+                                                            subagent_blocks: Vec::new(),
+                                                        });
+                                                    });
+                                                });
+                                            }
+                                        } else {
+                                            // Belt-and-suspenders dedup: backend already deduplicates,
+                                            // but guard here too in case of reconnection replays.
+                                            let already_exists = blocks.get_untracked().iter().any(|b| match b {
+                                                MessageBlock::ToolCall { call_id, .. } => call_id == &data.id,
+                                                _ => false,
+                                            });
+                                            if !already_exists {
+                                                let id = next_id();
+                                                set_blocks.update(|bs| bs.push(MessageBlock::ToolCall {
+                                                    id,
+                                                    call_id: data.id.clone(),
+                                                    name: data.name,
+                                                    args: data.args,
+                                                    canonical_path: data.canonical_path,
+                                                    label: data.label,
+                                                    status: ToolCallStatus::Running,
+                                                    subagent_trajectory_id: None,
+                                                    subagent_blocks: Vec::new(),
+                                                }));
+                                                set_stream_tool_id.set(Some(data.id));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    let on_tool_result = {
+                        let main_trajectory_id = main_trajectory_id.clone();
+                        move |event: &web_sys::Event| {
+                            if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
+                                if let Some(data_str) = msg_event.data().as_string() {
+                                    if let Ok(data) = serde_json::from_str::<ToolResultEvent>(&data_str) {
+                                        let is_subagent = if let Some(ref traj_id) = data.trajectory_id {
+                                            let mut main_id_opt = main_trajectory_id.borrow().clone();
+                                            if main_id_opt.is_none() {
+                                                *main_trajectory_id.borrow_mut() = Some(traj_id.clone());
+                                                main_id_opt = Some(traj_id.clone());
+                                            }
+                                            main_id_opt.as_ref() != Some(traj_id)
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_subagent {
+                                            let traj_id = data.trajectory_id.clone().unwrap();
+                                            let call_id_for_search = data.id.clone();
+                                            let is_error = data.error.is_some();
+                                            
+                                            set_blocks.update(|bs| {
+                                                fn update_status_recursive(blocks: &mut Vec<MessageBlock>, cid: &str, err: bool) -> bool {
+                                                    for b in blocks.iter_mut() {
+                                                        if let MessageBlock::ToolCall { call_id, ref mut status, subagent_blocks, .. } = b {
+                                                            if call_id == cid {
+                                                                *status = if err { ToolCallStatus::Error } else { ToolCallStatus::Done };
+                                                                return true;
+                                                            }
+                                                            if update_status_recursive(subagent_blocks, cid, err) {
+                                                                return true;
+                                                            }
+                                                        }
+                                                    }
+                                                    false
+                                                }
+                                                
+                                                update_status_recursive(bs, &call_id_for_search, is_error);
+                                                
+                                                let res_id = next_id();
+                                                let tool_id = data.id.clone();
+                                                let tool_name = data.name.clone();
+                                                let tool_result = data.result.clone();
+                                                let tool_error = data.error.clone();
+                                                
+                                                ensure_and_update_subagent_blocks_impl(bs, &traj_id, &mut |sub_blocks| {
+                                                    sub_blocks.push(MessageBlock::ToolResult {
+                                                        id: res_id,
+                                                        call_id: tool_id.clone(),
+                                                        name: tool_name.clone(),
+                                                        result: tool_result.clone(),
+                                                        error: tool_error.clone(),
+                                                    });
+                                                });
+                                            });
+                                        } else {
+                                            set_blocks.update(|bs| {
+                                                if let Some(MessageBlock::ToolCall { ref mut status, .. }) = bs.iter_mut().find(|b| match b {
+                                                    MessageBlock::ToolCall { call_id, .. } => call_id == &data.id,
+                                                    _ => false,
+                                                }) {
+                                                    *status = if data.error.is_some() {
+                                                        ToolCallStatus::Error
+                                                    } else {
+                                                        ToolCallStatus::Done
+                                                    };
+                                                }
+                                                let res_id = next_id();
+                                                bs.push(MessageBlock::ToolResult {
+                                                    id: res_id,
+                                                    call_id: data.id,
+                                                    name: data.name,
+                                                    result: data.result,
+                                                    error: data.error,
+                                                });
+                                            });
+                                            set_stream_tool_id.set(None);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    let on_question = {
+                        let main_trajectory_id = main_trajectory_id.clone();
+                        move |event: &web_sys::Event| {
+                            if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
+                                if let Some(data_str) = msg_event.data().as_string() {
+                                    if let Ok(data) = serde_json::from_str::<QuestionEvent>(&data_str) {
+                                        let is_subagent = {
+                                            let mut main_id_opt = main_trajectory_id.borrow().clone();
+                                            if main_id_opt.is_none() {
+                                                *main_trajectory_id.borrow_mut() = Some(data.trajectory_id.clone());
+                                                main_id_opt = Some(data.trajectory_id.clone());
+                                            }
+                                            main_id_opt.as_ref() != Some(&data.trajectory_id)
+                                        };
+
+                                        let id = next_id();
+                                        let traj_id = data.trajectory_id.clone();
+                                        let step_idx = data.step_index;
+                                        let qs = data.questions.clone();
+
+                                        if is_subagent {
+                                            set_blocks.update(|bs| {
+                                                ensure_and_update_subagent_blocks(bs, &data.trajectory_id, move |sub_blocks| {
+                                                    sub_blocks.push(MessageBlock::Question {
+                                                        id,
+                                                        trajectory_id: traj_id.clone(),
+                                                        step_index: step_idx,
+                                                        questions: qs.clone(),
+                                                        answered: false,
+                                                    });
+                                                });
+                                            });
+                                        } else {
+                                            set_blocks.update(|bs| bs.push(MessageBlock::Question {
+                                                id,
+                                                trajectory_id: data.trajectory_id.clone(),
+                                                step_index: data.step_index,
+                                                questions: data.questions,
+                                                answered: false,
+                                            }));
+                                        }
+
+                                        set_pending_question.set(Some(PendingQuestion {
+                                            trajectory_id: data.trajectory_id,
+                                            step_index: data.step_index,
+                                        }));
+                                    }
                                 }
                             }
                         }
@@ -1700,15 +2268,43 @@ fn ChatPage() -> impl IntoView {
                         }
                     };
 
-                    let on_compaction = move |event: &web_sys::Event| {
-                        if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
-                            if let Some(data_str) = msg_event.data().as_string() {
-                                if let Ok(data) = serde_json::from_str::<CompactionEvent>(&data_str) {
-                                    let id = next_id();
-                                    set_blocks.update(|bs| bs.push(MessageBlock::Compaction {
-                                        id,
-                                        step_index: data.step_index,
-                                    }));
+                    let on_compaction = {
+                        let main_trajectory_id = main_trajectory_id.clone();
+                        move |event: &web_sys::Event| {
+                            if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
+                                if let Some(data_str) = msg_event.data().as_string() {
+                                    if let Ok(data) = serde_json::from_str::<CompactionEvent>(&data_str) {
+                                        let is_subagent = if let Some(ref traj_id) = data.trajectory_id {
+                                            let mut main_id_opt = main_trajectory_id.borrow().clone();
+                                            if main_id_opt.is_none() {
+                                                *main_trajectory_id.borrow_mut() = Some(traj_id.clone());
+                                                main_id_opt = Some(traj_id.clone());
+                                            }
+                                            main_id_opt.as_ref() != Some(traj_id)
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_subagent {
+                                            let traj_id = data.trajectory_id.clone().unwrap();
+                                            let new_id = next_id();
+                                            let step_index = data.step_index;
+                                            set_blocks.update(|bs| {
+                                                ensure_and_update_subagent_blocks(bs, &traj_id, move |sub_blocks| {
+                                                    sub_blocks.push(MessageBlock::Compaction {
+                                                        id: new_id,
+                                                        step_index,
+                                                    });
+                                                });
+                                            });
+                                        } else {
+                                            let id = next_id();
+                                            set_blocks.update(|bs| bs.push(MessageBlock::Compaction {
+                                                id,
+                                                step_index: data.step_index,
+                                            }));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1718,35 +2314,88 @@ fn ChatPage() -> impl IntoView {
                     // We use them to collapse any open streaming-thinking block when the model
                     // finishes a step (DONE) and a tool is about to run. This prevents the
                     // thinking panel from remaining 'open' while the tool result comes in.
-                    let on_status = move |event: &web_sys::Event| {
-                        if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
-                            if let Some(data_str) = msg_event.data().as_string() {
-                                if let Ok(data) = serde_json::from_str::<StatusEvent>(&data_str) {
-                                    // When a step completes (DONE/ERROR), mark all open
-                                    // Thinking blocks as no longer streaming so they collapse.
-                                    if data.status == "DONE" || data.status == "ERROR" {
-                                        set_blocks.update(|bs| {
-                                            for b in bs.iter_mut() {
-                                                if let MessageBlock::Thinking { ref mut is_streaming, .. } = b {
-                                                    *is_streaming = false;
-                                                }
+                    let on_status = {
+                        let main_trajectory_id = main_trajectory_id.clone();
+                        move |event: &web_sys::Event| {
+                            if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
+                                if let Some(data_str) = msg_event.data().as_string() {
+                                    if let Ok(data) = serde_json::from_str::<StatusEvent>(&data_str) {
+                                        let is_subagent = if let Some(ref traj_id) = data.trajectory_id {
+                                            let mut main_id_opt = main_trajectory_id.borrow().clone();
+                                            if main_id_opt.is_none() {
+                                                *main_trajectory_id.borrow_mut() = Some(traj_id.clone());
+                                                main_id_opt = Some(traj_id.clone());
                                             }
-                                        });
+                                            main_id_opt.as_ref() != Some(traj_id)
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_subagent {
+                                            let traj_id = data.trajectory_id.clone().unwrap();
+                                            if data.status == "DONE" || data.status == "ERROR" {
+                                                set_blocks.update(|bs| {
+                                                    update_subagent_blocks(bs, &traj_id, |sub_blocks| {
+                                                        mark_all_thinking_done(sub_blocks);
+                                                    });
+                                                });
+                                            }
+                                        } else {
+                                            // When a step completes (DONE/ERROR), mark all open
+                                            // Thinking blocks as no longer streaming so they collapse.
+                                            if data.status == "DONE" || data.status == "ERROR" {
+                                                set_blocks.update(|bs| {
+                                                    for b in bs.iter_mut() {
+                                                        if let MessageBlock::Thinking { ref mut is_streaming, .. } = b {
+                                                            *is_streaming = false;
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     };
 
-                    let on_finish = move |event: &web_sys::Event| {
-                        if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
-                            if let Some(data_str) = msg_event.data().as_string() {
-                                if let Ok(data) = serde_json::from_str::<FinishEvent>(&data_str) {
-                                    let id = next_id();
-                                    set_blocks.update(|bs| bs.push(MessageBlock::Finish {
-                                        id,
-                                        structured_output: data.structured_output,
-                                    }));
+                    let on_finish = {
+                        let main_trajectory_id = main_trajectory_id.clone();
+                        move |event: &web_sys::Event| {
+                            if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
+                                if let Some(data_str) = msg_event.data().as_string() {
+                                    if let Ok(data) = serde_json::from_str::<FinishEvent>(&data_str) {
+                                        let is_subagent = if let Some(ref traj_id) = data.trajectory_id {
+                                            let mut main_id_opt = main_trajectory_id.borrow().clone();
+                                            if main_id_opt.is_none() {
+                                                *main_trajectory_id.borrow_mut() = Some(traj_id.clone());
+                                                main_id_opt = Some(traj_id.clone());
+                                            }
+                                            main_id_opt.as_ref() != Some(traj_id)
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_subagent {
+                                            let traj_id = data.trajectory_id.clone().unwrap();
+                                            let new_id = next_id();
+                                            let struct_out = data.structured_output.clone();
+                                            set_blocks.update(|bs| {
+                                                ensure_and_update_subagent_blocks(bs, &traj_id, move |sub_blocks| {
+                                                    sub_blocks.push(MessageBlock::Finish {
+                                                        id: new_id,
+                                                        structured_output: struct_out.clone(),
+                                                    });
+                                                });
+                                            });
+                                        } else {
+                                            let id = next_id();
+                                            set_blocks.update(|bs| bs.push(MessageBlock::Finish {
+                                                id,
+                                                structured_output: data.structured_output,
+                                            }));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1764,11 +2413,7 @@ fn ChatPage() -> impl IntoView {
                         stream_completed_fin.set(true);
 
                         set_blocks.update(|bs| {
-                            for b in bs.iter_mut() {
-                                if let MessageBlock::Thinking { ref mut is_streaming, .. } = b {
-                                    *is_streaming = false;
-                                }
-                            }
+                            mark_all_thinking_done(bs);
                         });
                         set_is_streaming.set(false);
                         set_stream_text_buf.set(String::new());
@@ -2378,46 +3023,67 @@ fn ChatPage() -> impl IntoView {
             </Show>
 
             // Main Chat Area
-            <div class="flex-1 flex flex-col h-full overflow-hidden bg-white dark:bg-[#212121] transition-colors duration-200">
-                // Top Bar
-                <header class="h-14 border-b border-[#e5e5e7] dark:border-[#2f2f2f] flex items-center px-4 justify-between bg-white dark:bg-[#212121] flex-shrink-0 z-10">
-                    <div class="flex items-center gap-2">
-                        <button
-                            on:click=move |_| set_sidebar_open.update(|o| *o = !*o)
-                            class="md:hidden p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400"
-                        >
-                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-                            </svg>
-                        </button>
+            <div class="flex-1 flex flex-row h-full overflow-hidden bg-white dark:bg-[#212121] transition-colors duration-200">
+                <div class="flex-1 flex flex-col h-full overflow-hidden relative">
+                    // Top Bar
+                    <header class="h-14 border-b border-[#e5e5e7] dark:border-[#2f2f2f] flex items-center px-4 justify-between bg-white dark:bg-[#212121] flex-shrink-0 z-10">
+                        <div class="flex items-center gap-2">
+                            <button
+                                on:click=move |_| set_sidebar_open.update(|o| *o = !*o)
+                                class="md:hidden p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400"
+                            >
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                                </svg>
+                            </button>
 
-                        <div class="flex items-center gap-1.5 font-semibold text-base text-gray-900 dark:text-gray-100 select-none">
-                            {active_session_title}
-                            <span class="text-xs font-normal text-gray-400 dark:text-gray-500">
-                                "v0.1.4"
-                            </span>
+                            <div class="flex items-center gap-1.5 font-semibold text-base text-gray-900 dark:text-gray-100 select-none">
+                                {active_session_title}
+                                <span class="text-xs font-normal text-gray-400 dark:text-gray-500">
+                                    "v0.1.4"
+                                </span>
+                            </div>
                         </div>
-                    </div>
 
-                    <div class="flex items-center gap-2">
-                        <div class={move || {
-                            if is_streaming.get() {
-                                "w-2 h-2 rounded-full bg-[#10a37f] animate-pulse"
-                            } else {
-                                "w-2 h-2 rounded-full bg-[#10a37f]"
-                            }
-                        }}></div>
-                        <span class="text-xs text-gray-500 dark:text-gray-400 font-medium">
-                            {move || {
-                                if is_streaming.get() {
-                                    "Streaming"
-                                } else {
-                                    "Ready"
+                        <div class="flex items-center gap-3">
+                            <button
+                                on:click=move |_| set_hub_open.update(|open| *open = !*open)
+                                class=move || {
+                                    let active = if hub_open.get() {
+                                        "text-blue-500 bg-blue-500/10 border-blue-500/20"
+                                    } else {
+                                        "text-gray-500 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-zinc-800 border-transparent"
+                                    };
+                                    format!("p-2 rounded-lg border text-xs font-medium transition-all duration-200 flex items-center gap-1.5 {}", active)
                                 }
-                            }}
-                        </span>
-                    </div>
-                </header>
+                                title="Agent Status Hub"
+                            >
+                                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2" />
+                                </svg>
+                                <span class="hidden sm:inline">"Status Hub"</span>
+                            </button>
+
+                            <div class="flex items-center gap-2">
+                                <div class={move || {
+                                    if is_streaming.get() {
+                                        "w-2 h-2 rounded-full bg-[#10a37f] animate-pulse"
+                                    } else {
+                                        "w-2 h-2 rounded-full bg-[#10a37f]"
+                                    }
+                                }}></div>
+                                <span class="text-xs text-gray-500 dark:text-gray-400 font-medium">
+                                    {move || {
+                                        if is_streaming.get() {
+                                            "Streaming"
+                                        } else {
+                                            "Ready"
+                                        }
+                                    }}
+                                </span>
+                            </div>
+                        </div>
+                    </header>
 
                 // Messages Viewport
                 <div class="flex-1 overflow-y-auto" id="chat-messages-container" node_ref=messages_container_ref>
@@ -2805,7 +3471,57 @@ fn ChatPage() -> impl IntoView {
                     </div>
                 </div>
             </Show>
+            </div>
 
+            // Glassmorphic status hub sidebar
+            <aside class=move || {
+                let width = if hub_open.get() {
+                    "w-80 border-l border-gray-200/10 dark:border-white/5 opacity-100 visible"
+                } else {
+                    "w-0 opacity-0 invisible"
+                };
+                format!("h-full flex flex-col transition-all duration-300 ease-in-out bg-white/60 dark:bg-[#151515]/60 backdrop-blur-xl overflow-hidden shrink-0 {}", width)
+            }>
+                <div class="p-4 border-b border-gray-200/10 dark:border-white/5 flex items-center justify-between">
+                    <h3 class="text-sm font-semibold text-gray-800 dark:text-gray-200">
+                        "Agent Status Hub"
+                    </h3>
+                    <button
+                        on:click=move |_| set_hub_open.set(false)
+                        class="p-1 rounded-md text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors"
+                    >
+                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                </div>
+
+                <div class="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
+                    {move || {
+                        let subagents = collect_subagents_recursive(&blocks.get());
+                        if subagents.is_empty() {
+                            view! {
+                                <div class="flex flex-col items-center justify-center h-48 text-center text-gray-400 dark:text-zinc-500">
+                                    <svg class="w-8 h-8 mb-2 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                                    </svg>
+                                    <span class="text-xs">"No active subagents"</span>
+                                </div>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <div class="flex flex-col space-y-4">
+                                    {subagents.into_iter().map(|item| {
+                                        view! {
+                                            <SubagentStatusItem item=item depth=0 />
+                                        }
+                                    }).collect::<Vec<_>>()}
+                                </div>
+                            }.into_any()
+                        }
+                    }}
+                </div>
+            </aside>
         </div>
     }
 }
