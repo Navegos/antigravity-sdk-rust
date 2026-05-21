@@ -76,9 +76,17 @@ async fn main() -> Result<(), anyhow::Error> {
             Decision::AskUser,
             Some(Arc::new(critical_file_predicate)),
             Some(Arc::new(programmatic_approval_handler)),
-            "ask-for-critical-writes".to_string(),
+            "ask-for-critical-create".to_string(),
         ),
         policy::allow("CREATE_FILE"),
+        Policy::new(
+            "EDIT_FILE".to_string(),
+            Decision::AskUser,
+            Some(Arc::new(critical_file_predicate)),
+            Some(Arc::new(programmatic_approval_handler)),
+            "ask-for-critical-edit".to_string(),
+        ),
+        policy::allow("EDIT_FILE"),
     ];
     config.policies = Some(policies);
 
@@ -109,7 +117,7 @@ async fn main() -> Result<(), anyhow::Error> {
    * Pre-filters tool arguments.
    * If `CommandLine` includes `"rm"`, evaluation returns `Decision::Deny`, blocking execution instantly.
    * If the predicate returns `false` (no `rm` found), this deny policy is skipped. The specific allow policy for `RUN_COMMAND` (bucket 2) then matches and permits execution.
-4. **`CREATE_FILE` with Interceptor**:
+4. **`CREATE_FILE` and `EDIT_FILE` with Interceptors**:
    * Evaluates if the path ends in `.key` or contains `production`.
    * If it matches, decision is `Decision::AskUser`, redirecting execution flow to `programmatic_approval_handler`.
    * The handler returns `false` (simulating user rejection), blocking the tool call and returning a prompt refusal.

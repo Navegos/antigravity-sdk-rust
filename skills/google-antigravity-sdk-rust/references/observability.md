@@ -52,7 +52,7 @@ When consuming the conversation stream using the asynchronous streaming API, chu
 use antigravity_sdk_rust::types::StreamChunk;
 use futures_util::StreamExt;
 
-let conversation = agent.conversation()?;
+let conversation = agent.conversation();
 let mut stream = conversation.chat("How does rust memory safety work?").await?;
 
 while let Some(chunk_res) = stream.next().await {

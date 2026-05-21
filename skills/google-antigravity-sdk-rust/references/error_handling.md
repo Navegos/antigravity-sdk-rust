@@ -20,54 +20,77 @@ The SDK provides a thread-safe lifecycle hook mechanism. Registering structures 
 ### The Hook Trait Definition
 
 ```rust
-use antigravity_sdk_rust::types::{ToolCall, ToolResult, HookResult, AskQuestionEntry, QuestionHookResult};
+use antigravity_sdk_rust::types::{AskQuestionEntry, HookResult, QuestionHookResult, ToolCall, ToolResult};
 
 pub trait Hook: Send + Sync {
-    /// Triggered when the subprocess is initialized and the session starts.
-    async fn on_session_start(&self) -> Result<(), anyhow::Error> {
-        Ok(())
+    /// Triggered when the agent establishes a connection and starts a session.
+    fn on_session_start(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async { Ok(()) }
     }
 
     /// Intercepts the start of a user turn before the LLM processes the prompt.
     /// Returns `allow: false` to halt execution.
-    async fn pre_turn(&self) -> Result<HookResult, anyhow::Error> {
-        Ok(HookResult {
-            allow: true,
-            message: String::new(),
-        })
+    fn pre_turn(
+        &self,
+    ) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
+        async {
+            Ok(HookResult {
+                allow: true,
+                message: String::new(),
+            })
+        }
     }
 
-    /// Triggered before a tool execution. Returns a HookResult indicating whether to allow or block.
-    async fn pre_tool_call(&self, _tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
-        Ok(HookResult { allow: true, message: String::new() })
+    /// Intercepts a tool call immediately before it is executed by the runner.
+    /// Returns `allow: false` to prevent execution.
+    fn pre_tool_call<'a>(
+        &'a self,
+        _tool_call: &'a ToolCall,
+    ) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
+        async {
+            Ok(HookResult {
+                allow: true,
+                message: String::new(),
+            })
+        }
     }
 
-    /// Triggered after a tool execution successfully completes.
-    async fn post_tool_call(&self, _result: &ToolResult) -> Result<(), anyhow::Error> {
-        Ok(())
+    /// Triggered after a tool successfully returns a result.
+    fn post_tool_call<'a>(
+        &'a self,
+        _result: &'a ToolResult,
+    ) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async { Ok(()) }
     }
 
     /// Triggered when a tool execution encounters an error.
     /// Allows fallback logic or customized error payloads.
-    async fn on_tool_error(
-        &self,
-        error: &anyhow::Error,
-    ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
-        Ok((
-            HookResult {
-                allow: false,
-                message: error.to_string(),
-            },
-            None,
-        ))
+    fn on_tool_error<'a>(
+        &'a self,
+        error: &'a anyhow::Error,
+    ) -> impl std::future::Future<
+        Output = Result<(HookResult, Option<serde_json::Value>), anyhow::Error>,
+    > + Send {
+        async move {
+            Ok((
+                HookResult {
+                    allow: false,
+                    message: error.to_string(),
+                },
+                None,
+            ))
+        }
     }
 
-    /// Triggered when the agent prompts the user with interactive questions.
-    async fn on_interaction(
-        &self,
-        _questions: &[AskQuestionEntry],
-    ) -> Result<Option<QuestionHookResult>, anyhow::Error> {
-        Ok(None)
+    /// Intercepts a prompt to ask the user clarifying questions.
+    fn on_interaction<'a>(
+        &'a self,
+        _questions: &'a [AskQuestionEntry],
+    ) -> impl std::future::Future<Output = Result<Option<QuestionHookResult>, anyhow::Error>> + Send
+    {
+        async { Ok(None) }
     }
 }
 ```
@@ -87,32 +110,40 @@ use std::sync::Arc;
 struct DiagnosticLogger;
 
 impl Hook for DiagnosticLogger {
-    async fn pre_tool_call(&self, tool_call: &ToolCall) -> Result<HookResult, anyhow::Error> {
-        println!("[HOOK] Executing Tool: {} with args: {}", tool_call.name, tool_call.args);
-        Ok(HookResult {
-            allow: true,
-            message: String::new(),
-        })
+    fn pre_tool_call<'a>(&'a self, tool_call: &'a ToolCall) -> impl std::future::Future<Output = Result<HookResult, anyhow::Error>> + Send {
+        async move {
+            println!("[HOOK] Executing Tool: {} with args: {}", tool_call.name, tool_call.args);
+            Ok(HookResult {
+                allow: true,
+                message: String::new(),
+            })
+        }
     }
 
-    async fn post_tool_call(&self, result: &ToolResult) -> Result<(), anyhow::Error> {
-        println!("[HOOK] Tool Complete: {} - Result: {:?}", result.name, result.result);
-        Ok(())
+    fn post_tool_call<'a>(&'a self, result: &'a ToolResult) -> impl std::future::Future<Output = Result<(), anyhow::Error>> + Send {
+        async move {
+            println!("[HOOK] Tool Complete: {} - Result: {:?}", result.name, result.result);
+            Ok(())
+        }
     }
 
-    async fn on_tool_error(
-        &self,
-        error: &anyhow::Error,
-    ) -> Result<(HookResult, Option<serde_json::Value>), anyhow::Error> {
-        eprintln!("[HOOK ERROR] Tool failed: {}", error);
-        // Custom telemetry or recovery logic can go here
-        Ok((
-            HookResult {
-                allow: false,
-                message: error.to_string(),
-            },
-            None,
-        ))
+    fn on_tool_error<'a>(
+        &'a self,
+        error: &'a anyhow::Error,
+    ) -> impl std::future::Future<
+        Output = Result<(HookResult, Option<serde_json::Value>), anyhow::Error>,
+    > + Send {
+        async move {
+            eprintln!("[HOOK ERROR] Tool failed: {}", error);
+            // Custom telemetry or recovery logic can go here
+            Ok((
+                HookResult {
+                    allow: false,
+                    message: error.to_string(),
+                },
+                None,
+            ))
+        }
     }
 }
 

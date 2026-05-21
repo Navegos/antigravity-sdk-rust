@@ -91,16 +91,36 @@ Browser → Spin Component (WASI)
 
 **Path:** `agent_server/`
 
-A lightweight HTTP server that wraps the full `antigravity-sdk-rust` Agent and exposes it via REST. Designed as a companion sidecar for Spin/WASI applications that cannot use TCP/WebSocket directly.
+A lightweight HTTP server that wraps the full `antigravity-sdk-rust` Agent and exposes it via REST/SSE. Designed as a companion sidecar for Spin/WASI applications that cannot use TCP/WebSocket directly.
 
-**Endpoints:**
+#### SSE Sidecar Architecture & WASI Bridging
+
+Standard WebAssembly components deployed to edge environments like Spin or SpinKube are compiled to target WASI. Because standard WASI runtimes do not currently support raw outbound TCP/WebSocket sockets (supporting only outbound HTTP requests via `wasi:http`), a native WebAssembly guest cannot establish the WebSocket connection required to communicate with `localharness`.
+
+To bridge this runtime limitation:
+1. **Host-Side Sidecar**: The `agent_server` runs as a native host-side process alongside the WASI sandbox. It manages the full Rust SDK agent lifecycle, starts the `localharness` subprocess, and handles raw bidirectional WebSocket traffic.
+2. **Server-Sent Events (SSE) Proxy**: The sidecar exposes an HTTP/SSE interface. The WASI guest makes outbound HTTP requests to the sidecar, which proxies commands to the agent and streams updates back using SSE events.
+
+```
+Browser ──[HTTP/SSE]──→ Spin Component (WASI) ──[HTTP/SSE]──→ agent_server (native sidecar)
+                                                                 ├─ Agent::chat()
+                                                                 ├─ WebSocket → localharness
+                                                                 └─ Gemini API
+```
+
+#### Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/chat` | Send a message, get a response via the full Agent pipeline |
-| `GET` | `/health` | Health check |
+| `GET` | `/chat/stream` | Initiates an SSE (Server-Sent Events) chat stream for a session. Query parameters: `session_id`, `message`. |
+| `POST` | `/halt` | Halts/terminates a running chat stream. Request body: `{"session_id": "..."}`. |
+| `POST` | `/answer` | Answers/replies to an interactive question. Request body: `{"session_id": "...", "trajectory_id": "...", "step_index": 0, "responses": [{"selected_option_ids": ["..."], "freeform_response": "...", "skipped": false}], "cancelled": false}`. |
+| `POST` | `/confirm` | Approves or denies a pending tool execution confirmation hook request. Request body: `{"session_id": "...", "trajectory_id": "...", "step_index": 0, "accepted": true, "allow_for_session": false, "tool_name": "RUN_COMMAND"}`. |
+| `GET`/`POST` | `/workspace` | Gets or sets the workspace directory for the session. |
+| `GET` | `/resolve/folder` | Resolves details about a folder in the workspace. |
+| `GET` | `/health` | Health check. |
 
-**Environment Variables:**
+#### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -109,15 +129,15 @@ A lightweight HTTP server that wraps the full `antigravity-sdk-rust` Agent and e
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Model to use |
 | `ANTIGRAVITY_HARNESS_PATH` | `bin/localharness` | Path to localharness binary |
 
-**Run:**
+#### Run
+
 ```sh
 cd examples/agent_server
 GEMINI_API_KEY=your-key cargo run
 ```
 
-**Test with curl:**
+#### Test with curl (Stream)
+
 ```sh
-curl -X POST http://127.0.0.1:8080/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hello, what can you do?"}'
+curl -N "http://127.0.0.1:8080/chat/stream?session_id=sess_test&message=hello"
 ```

@@ -34,7 +34,7 @@ async fn main() -> Result<(), anyhow::Error> {
         agent1.chat("Remember this: my favorite color is blue.").await?;
 
         // Retrieve the generated conversation ID
-        let conv_id = agent1.conversation_id().unwrap();
+        let conv_id = agent1.conversation_id();
         agent1.stop().await?;
         conv_id
     };

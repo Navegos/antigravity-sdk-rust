@@ -66,3 +66,19 @@ The `CapabilitiesConfig` struct also supports:
 
 * **`compaction_threshold`**: Configures the context length at which conversation message history compaction triggers to reduce token usage.
 * **`image_model`**: Specifies the model used for image generation tasks (e.g. Imagen models).
+
+---
+
+## Tool Details: RUN_COMMAND
+
+The `RUN_COMMAND` tool allows the agent to execute shell commands in the workspace environment.
+
+### Environment Variable Forwarding
+To ensure that build tools, compilers, and CLI runtimes are correctly found, `RUN_COMMAND` automatically inherits and forwards critical environment variables from the host process:
+* **`PATH`**: Used to locate executable binaries.
+* **`SHELL`**: Specifies the user's default shell for execution.
+
+### Execution Output & Exit Code
+When `RUN_COMMAND` runs a command, it captures both stdout and stderr in a merged output stream, returning the following fields in the tool call and output payload:
+* **`combined_output`**: A string containing the merged stdout and stderr from the command.
+* **`exit_code`**: An integer indicating the process exit code (e.g., `0` for success).

@@ -23,7 +23,10 @@ pub trait Tool: Send + Sync {
 
     /// The asynchronous function executed when the model calls the tool.
     /// Receives arguments as a JSON `Value` and returns a JSON `Value` result.
-    async fn call(&self, args: Value) -> Result<Value, anyhow::Error>;
+    fn call(
+        &self,
+        args: Value,
+    ) -> impl std::future::Future<Output = Result<Value, anyhow::Error>> + Send;
 }
 ```
 
@@ -64,16 +67,21 @@ impl Tool for HashStringTool {
         }"#
     }
 
-    async fn call(&self, args: Value) -> Result<Value, anyhow::Error> {
-        let text = args.get("text")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("Missing parameter: text"))?;
-        
-        let mut hasher = Sha256::new();
-        hasher.update(text.as_bytes());
-        let result = format!("{:x}", hasher.finalize());
+    fn call(
+        &self,
+        args: Value,
+    ) -> impl std::future::Future<Output = Result<Value, anyhow::Error>> + Send {
+        async move {
+            let text = args.get("text")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("Missing parameter: text"))?;
+            
+            let mut hasher = Sha256::new();
+            hasher.update(text.as_bytes());
+            let result = format!("{:x}", hasher.finalize());
 
-        Ok(serde_json::json!({ "sha256": result }))
+            Ok(serde_json::json!({ "sha256": result }))
+        }
     }
 }
 ```

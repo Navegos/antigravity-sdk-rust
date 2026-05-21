@@ -54,7 +54,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut agent = Agent::new(config);
     agent.start().await?;
 
-    let conversation = agent.conversation()?;
+    let conversation = agent.conversation();
     let mut stream = conversation.chat("Solve this math riddle: I am an odd number. Take away one letter and I become even. What number am I?").await?;
 
     while let Some(chunk_res) = stream.next().await {

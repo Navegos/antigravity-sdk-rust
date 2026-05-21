@@ -77,13 +77,21 @@ async fn main() -> Result<(), anyhow::Error> {
         .policy(policy::allow("RUN_COMMAND"))
         // 4. Allow editing/creating files, but ask the user first if it's a critical file
         .policy(Policy::new(
-            "WRITE_TO_FILE".to_string(),
+            "CREATE_FILE".to_string(),
             Decision::AskUser,
             Some(Arc::new(critical_file_predicate)),
             Some(Arc::new(programmatic_approval_handler)),
-            "ask-for-critical-writes".to_string(),
+            "ask-for-critical-create".to_string(),
         ))
-        .policy(policy::allow("WRITE_TO_FILE"))
+        .policy(policy::allow("CREATE_FILE"))
+        .policy(Policy::new(
+            "EDIT_FILE".to_string(),
+            Decision::AskUser,
+            Some(Arc::new(critical_file_predicate)),
+            Some(Arc::new(programmatic_approval_handler)),
+            "ask-for-critical-edit".to_string(),
+        ))
+        .policy(policy::allow("EDIT_FILE"))
         .build();
 
     println!("Starting agent...");

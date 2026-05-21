@@ -60,7 +60,10 @@ let cmd_policy = policy::confirm_run_command(None);
 >
 > Within each priority group, policies are evaluated in registration order (first match wins). This means a `deny("tool_name")` always takes priority over an `allow("tool_name")`, and any specific-tool rule always takes priority over a wildcard (`*`) rule, regardless of insertion order.
 
-When custom workspaces are defined in `AgentConfig::workspaces`, workspace scoping policies are automatically prepended, ensuring filesystem path locks are evaluated first.
+When custom workspaces are defined in `AgentConfig::workspaces`, workspace scoping policies (e.g., `policy::workspace_only(...)`) are automatically prepended, ensuring filesystem path locks are evaluated first.
+
+> [!NOTE]
+> **Bypassing the Workspace Gate**: If the policy configuration contains `policy::allow_all()`, the SDK detects it and **skips prepending workspace scoping policies entirely**. This allows developers who use external approval workflows (like standard `ConfirmHook` handlers) to manage directory validation without the default SDK workspace locks overriding their approvals.
 
 ---
 

@@ -10,6 +10,7 @@ use wasi::http::proxy::export;
 use crate::app::{
     shell, App, ClearMessages, GetMessages, SendMessage, SaveChatTurn,
     ListSessions, CreateSession, GetSessionBlocks, SaveTurnBlocks, DeleteSession,
+    RenameSession,
 };
 
 struct LeptosServer;
@@ -48,6 +49,7 @@ async fn handle_request(
         .with_server_fn::<GetSessionBlocks, _>()
         .with_server_fn::<SaveTurnBlocks, _>()
         .with_server_fn::<DeleteSession, _>()
+        .with_server_fn::<RenameSession, _>()
         .generate_routes(App)
         .handle_with_context(move || shell(leptos_options.clone()), || {})
         .await?;
