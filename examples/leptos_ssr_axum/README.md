@@ -85,4 +85,6 @@ Open `http://localhost:3000` (or the port outputted by Spin) in your web browser
 - **Interactive Question Hooks**: Dynamically displays multi-choice options or text input forms within the chat timeline when the agent raises questions.
 - **Confirmation Intercepts**: Interactive approve/deny dialogs pop up when the agent attempts to run commands, edit files, or execute tools controlled by safety policies.
 - **Real-Time Step Logs**: Watch the agent execute its plan step-by-step with collapsible micro-logs showing tool execution details, standard output, and tool statuses.
+- **Subagent Nesting & Trajectory Tracking**: Supports nested subagent executions. The UI tracks trajectory IDs and renders subagent execution timelines nested inline within the parent chat timeline.
+- **Client-Side Tool Step logs**: Displays live progress and results/errors for custom client-side tools using synthetic step logging.
 - **Glassmorphic Theme**: A modern dark-mode design with sleek transitions, subtle hover micro-animations, and a responsive layout.

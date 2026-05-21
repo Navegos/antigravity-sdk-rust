@@ -28,9 +28,12 @@ Configure the server using the following environment variables (or by placing th
 |----------|---------|-------------|
 | `GEMINI_API_KEY` | *(Required)* | Your Google Gemini API Key |
 | `AGENT_SERVER_PORT` | `8080` | The port the sidecar listens on |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | The Gemini model used by the agent |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | The Gemini model used by the agent (supports Thinking) |
 | `ANTIGRAVITY_HARNESS_PATH` | `bin/localharness` | Path to the localharness binary relative to workspace |
 | `RUST_LOG` | `info` | Logging verbosity level (`debug`, `info`, `warn`, `error`) |
+
+*Note: Google Search grounding (`enable_google_search`) and URL context resolution (`enable_url_context`) are configured as enabled on the agent setup.*
+
 
 ---
 
@@ -59,6 +62,24 @@ Starts a Server-Sent Events (SSE) chat stream for a session.
   ```sh
   curl -N "http://127.0.0.1:8080/chat/stream?session_id=sess_123&message=hello"
   ```
+
+#### Streamed Events
+The stream emits various types of SSE events depending on the agent's progress. All primary execution events now include a `trajectory_id` to allow the client to map events to their respective execution context (e.g. for nesting subagents):
+
+| Event Name | Fields | Description |
+|------------|--------|-------------|
+| `thought` | `step_index`, `text`, `trajectory_id` | Contains deltas of the model's thinking/reasoning process. |
+| `token` | `step_index`, `text`, `trajectory_id` | Contains text tokens of the model's final response content. |
+| `tool_start` | `id`, `name`, `args`, `canonical_path`, `label`, `trajectory_id` | Emitted when a client-side or server-side tool begins execution. Includes `label` which is the human-readable description of the step. |
+| `tool_result`| `id`, `name`, `result`, `error`, `trajectory_id` | Emitted when a tool execution completes, carrying the result payload or error description. |
+| `confirm` | `session_id`, `trajectory_id`, `step_index`, `tool_name` | Raised when a security policy halts a tool execution and requires explicit client confirmation. |
+| `question` | `session_id`, `trajectory_id`, `step_index`, `question` | Raised when the agent prompts the user with an interactive question. |
+| `usage` | `input_tokens`, `output_tokens`, `total_tokens` | Emitted at the end of execution to summarize the token usage. |
+| `compaction`| `compacted_steps_count` | Emitted when a trajectory exceeds context limits and undergoes history compaction. |
+| `finish` | (empty) | Signals the model finished generating text. |
+| `error` | `message` | Emitted when a stream/execution error occurs. |
+| `done` | (empty) | Signals final clean stream shutdown. |
+
 
 ### 2. `POST /halt`
 Terminates a running agent execution stream for a given session.

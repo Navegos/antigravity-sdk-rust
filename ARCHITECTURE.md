@@ -129,7 +129,18 @@ The lifecycle details:
 4. **Harness Initialization**: An `InitializeConversationEvent` is sent over the WebSocket containing the full `HarnessConfig` protobuf serialized as JSON. This registers active capabilities, workspaces, custom tools, and system instructions.
 5. **Event Loops & Sentinel Termination**: The connection spawns a Reader task and a Sender task. The event loops stream step updates. Once a `TrajectoryStateUpdate` with `STATE_IDLE` is received, the connection knows the execution trajectory is complete. It pushes an `IDLE_SENTINEL` step to the receiver channel, which signals the consumer stream to yield `None` and terminate cleanly.
 
+### Client-Side Tool Step Interception & Streaming
+
+While standard tool executions are managed internally by the remote/local harness and streamed as native harness steps, client-side tools (custom tool registrations) run within the Rust process context. To ensure they are fully visible to client interfaces and timeline loggers:
+
+1. **Step Interception**: Upon receiving a `ToolCall` event, the SDK connection intercepts it prior to calling the registry.
+2. **ACTIVE Step Emission**: The connection immediately constructs a synthetic `Step` with `status: StepStatus::Active` and streams it down to the `step_tx` channel. This notifies client interfaces that the tool is active, allowing them to render executing cards/spinners.
+3. **Execution & Hook Processing**: The connection runs pre-tool-call hooks/policies. If any policy denies execution, the connection generates a synthetic `ERROR` state step, sends a denial response back to the harness, and terminates the tool task.
+4. **Completion Step Emission**: If allowed and executed, the outcome of the client tool is captured. The connection emits a synthetic `DONE` state step containing the execution outputs (or an `ERROR` state step containing the execution panic/error message) down to `step_tx`.
+5. **Synthetic Indexing**: To prevent collisions with actual step numbers tracked by the `localharness` (which are typically sequential starting from 0/1), all synthetic client-side tool steps are indexed sequentially starting at `50,000`.
+
 ---
+
 
 ## Thread Safety & Concurrency
 

@@ -93,7 +93,11 @@ async fn main() -> Result<(), anyhow::Error> {
     let tool_runner = ToolRunner::new();
     let strategy = LocalConnectionStrategy::new(
         "localharness".to_string(), // path to harness
-        GeminiConfig::default(),
+        GeminiConfig {
+            enable_google_search: Some(true),
+            enable_url_context: Some(true),
+            ..Default::default()
+        },
         Default::default(),
         None,
         None,
@@ -167,6 +171,21 @@ let policies = vec![
     policy::allow("VIEW_FILE"),                  // Allow reading/viewing files
 ];
 ```
+
+### Google Search Grounding & Web Search Fallback
+
+The SDK supports server-side Google Search grounding and provides a client-side search fallback:
+
+- **Google Search Grounding**: Enable Gemini's native Google Search grounding tool by setting `enable_google_search: Some(true)` in `GeminiConfig`. This enables the model to natively perform search queries server-side to return up-to-date online information.
+- **Web Search Fallback**: If the model decides to invoke a tool call named `google_search` or `web_search` and no custom search tool has been registered with `ToolRunner`, the SDK automatically runs a built-in search fallback. On native platforms, it spawns a `python3` subprocess to scrape and parse DuckDuckGo search results. On WASM platforms, it returns an empty result block indicating search is not available.
+
+### Client-Side Tool Step Updates
+
+When custom client-side tools are executed, the SDK connection dynamically generates and streams synthetic `Step` updates:
+- Enters `ACTIVE` state before executing the tool, allowing the user interface to render an active tool execution card.
+- Emits `DONE` (on success) or `ERROR` (on failure) once execution completes, displaying the results/error on the timeline.
+- To prevent collision with step indices assigned by the harness, client-side tool steps use synthetic indices starting at `50,000`.
+
 
 ## Web Integration
 
