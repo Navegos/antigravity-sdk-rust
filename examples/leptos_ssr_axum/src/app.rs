@@ -453,8 +453,6 @@ fn QuestionView(
     );
 
     let on_submit = Callback::new({
-        let on_answer = on_answer.clone();
-        let selections = selections.clone();
         move |_: leptos::web_sys::MouseEvent| {
             let current = selections.get();
             let responses = current.into_iter().map(|(opt_ids, freeform)| {
@@ -470,7 +468,6 @@ fn QuestionView(
 
     let on_skip = Callback::new({
         let questions = questions.clone();
-        let on_answer = on_answer.clone();
         move |_: leptos::web_sys::MouseEvent| {
             let responses = questions.iter().map(|_| {
                 QuestionResponse {
@@ -1138,7 +1135,7 @@ fn ChatPage() -> impl IntoView {
             {
                 if let Some(el) = edit_input_ref.get() {
                     let _ = el.focus();
-                    let _ = el.select();
+                    el.select();
                 }
             }
         }
@@ -1309,7 +1306,7 @@ fn ChatPage() -> impl IntoView {
     let do_delete_session = move |sid: String| {
         let active_id = active_session_id.get_untracked();
         spawn_local(async move {
-            if let Ok(_) = delete_session(sid.clone()).await {
+            if delete_session(sid.clone()).await.is_ok() {
                 if let Ok(updated_list) = list_sessions().await {
                     set_sessions.set(updated_list.clone());
                     if Some(sid) == active_id {
@@ -1343,10 +1340,6 @@ fn ChatPage() -> impl IntoView {
 
     // Halt/Cancel streaming
     let on_halt = {
-        #[cfg(feature = "hydrate")]
-        let active_es = active_es.clone();
-        #[cfg(feature = "hydrate")]
-        let active_listeners = active_listeners.clone();
         move |_| {
             #[cfg(feature = "hydrate")]
             {
@@ -1374,13 +1367,11 @@ fn ChatPage() -> impl IntoView {
         let _ = &responses;
         let _ = cancelled;
         set_blocks.update(|bs| {
-            if let Some(b) = bs.iter_mut().find(|b| match b {
+            if let Some(MessageBlock::Question { ref mut answered, .. }) = bs.iter_mut().find(|b| match b {
                 MessageBlock::Question { id, .. } => *id == block_id,
                 _ => false,
             }) {
-                if let MessageBlock::Question { ref mut answered, .. } = b {
-                    *answered = true;
-                }
+                *answered = true;
             }
         });
         if let Some(pending) = pending_question.get_untracked() {
@@ -1529,8 +1520,6 @@ fn ChatPage() -> impl IntoView {
 
                     // Event handlers
                     let on_token = {
-                        let streaming_assistant_id = streaming_assistant_id.clone();
-                        let current_text_step = current_text_step.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -1564,8 +1553,6 @@ fn ChatPage() -> impl IntoView {
                     };
 
                     let on_thought = {
-                        let streaming_thinking_id = streaming_thinking_id.clone();
-                        let current_think_step = current_think_step.clone();
                         move |event: &web_sys::Event| {
                             if let Ok(msg_event) = event.clone().dyn_into::<MessageEvent>() {
                                 if let Some(data_str) = msg_event.data().as_string() {
@@ -1631,17 +1618,15 @@ fn ChatPage() -> impl IntoView {
                             if let Some(data_str) = msg_event.data().as_string() {
                                 if let Ok(data) = serde_json::from_str::<ToolResultEvent>(&data_str) {
                                     set_blocks.update(|bs| {
-                                        if let Some(b) = bs.iter_mut().find(|b| match b {
+                                        if let Some(MessageBlock::ToolCall { ref mut status, .. }) = bs.iter_mut().find(|b| match b {
                                             MessageBlock::ToolCall { call_id, .. } => call_id == &data.id,
                                             _ => false,
                                         }) {
-                                            if let MessageBlock::ToolCall { ref mut status, .. } = b {
-                                                *status = if data.error.is_some() {
-                                                    ToolCallStatus::Error
-                                                } else {
-                                                    ToolCallStatus::Done
-                                                };
-                                            }
+                                            *status = if data.error.is_some() {
+                                                ToolCallStatus::Error
+                                            } else {
+                                                ToolCallStatus::Done
+                                            };
                                         }
                                         let res_id = next_id();
                                         bs.push(MessageBlock::ToolResult {
@@ -1794,7 +1779,7 @@ fn ChatPage() -> impl IntoView {
 
                         let session_id = active_session_id.get_untracked().unwrap_or_default();
                         let all_blocks = blocks.get_untracked();
-                        let set_sessions3 = set_sessions2.clone();
+                        let set_sessions3 = set_sessions2;
                         // Snapshot local titles before async save so user-renames survive the
                         // KV round-trip (rename_session and save_turn_blocks can race).
                         let local_titles: std::collections::HashMap<String, String> =
@@ -1831,8 +1816,8 @@ fn ChatPage() -> impl IntoView {
                     // 'idle' fires just before 'done' — use it as the primary completion trigger
                     // so we finalise as soon as possible, reducing any timing gap.
                     let do_finalize_idle = do_finalize.clone();
-                    let active_es_idle = active_es.clone();
-                    let active_listeners_idle = active_listeners.clone();
+                    let active_es_idle = active_es;
+                    let active_listeners_idle = active_listeners;
                     let on_idle = move |_event: &web_sys::Event| {
                         do_finalize_idle();
                         // Close the EventSource so the browser doesn't keep the connection open.
@@ -1844,8 +1829,8 @@ fn ChatPage() -> impl IntoView {
                         active_listeners_idle.set_value(None);
                     };
 
-                    let active_es_done = active_es.clone();
-                    let active_listeners_done = active_listeners.clone();
+                    let active_es_done = active_es;
+                    let active_listeners_done = active_listeners;
                     let do_finalize_done = do_finalize.clone();
                     let on_done = move |_event: &web_sys::Event| {
                         // Do NOT close if a confirm is still pending.
@@ -1871,8 +1856,8 @@ fn ChatPage() -> impl IntoView {
                     //      These are followed by idle+done events so stream_completed guards them.
                     // Heuristic: if the error message is the SDK permission-denial string, it is
                     // a non-fatal tool error — skip the stream-tear-down.
-                    let active_es_err = active_es.clone();
-                    let active_listeners_err = active_listeners.clone();
+                    let active_es_err = active_es;
+                    let active_listeners_err = active_listeners;
                     let stream_completed_err = stream_completed.clone();
                     let do_finalize_err = do_finalize.clone();
                     let on_sse_error = move |event: &web_sys::Event| {
@@ -1928,8 +1913,8 @@ fn ChatPage() -> impl IntoView {
                     // Native onerror is set via the ES property so it does NOT double-fire
                     // with the addEventListener("error") above (which handles named SSE errors).
                     // We only use native onerror as a final safety net.
-                    let active_es_native_err = active_es.clone();
-                    let active_listeners_native_err = active_listeners.clone();
+                    let active_es_native_err = active_es;
+                    let active_listeners_native_err = active_listeners;
                     let stream_completed_nat = stream_completed.clone();
                     let do_finalize_nat = do_finalize.clone();
                     let native_err_closure = Closure::<dyn FnMut(_)>::new(move |_event: web_sys::Event| {
@@ -1960,20 +1945,21 @@ fn ChatPage() -> impl IntoView {
                     active_onerror_closure.set_value(Some(native_err_closure));
 
                     let target: &web_sys::EventTarget = es.as_ref();
-                    let mut list = Vec::new();
-                    list.push(EventListener::new(target, "token", on_token));
-                    list.push(EventListener::new(target, "thought", on_thought));
-                    list.push(EventListener::new(target, "status", on_status));
-                    list.push(EventListener::new(target, "tool_start", on_tool_start));
-                    list.push(EventListener::new(target, "tool_result", on_tool_result));
-                    list.push(EventListener::new(target, "question", on_question));
-                    list.push(EventListener::new(target, "confirm", on_confirm));
-                    list.push(EventListener::new(target, "usage", on_usage));
-                    list.push(EventListener::new(target, "compaction", on_compaction));
-                    list.push(EventListener::new(target, "finish", on_finish));
-                    list.push(EventListener::new(target, "idle", on_idle));
-                    list.push(EventListener::new(target, "error", on_sse_error));
-                    list.push(EventListener::new(target, "done", on_done));
+                    let list = vec![
+                        EventListener::new(target, "token", on_token),
+                        EventListener::new(target, "thought", on_thought),
+                        EventListener::new(target, "status", on_status),
+                        EventListener::new(target, "tool_start", on_tool_start),
+                        EventListener::new(target, "tool_result", on_tool_result),
+                        EventListener::new(target, "question", on_question),
+                        EventListener::new(target, "confirm", on_confirm),
+                        EventListener::new(target, "usage", on_usage),
+                        EventListener::new(target, "compaction", on_compaction),
+                        EventListener::new(target, "finish", on_finish),
+                        EventListener::new(target, "idle", on_idle),
+                        EventListener::new(target, "error", on_sse_error),
+                        EventListener::new(target, "done", on_done),
+                    ];
 
                     active_listeners.set_value(Some(list));
                     active_es.set_value(Some(es));
@@ -2601,9 +2587,9 @@ fn ChatPage() -> impl IntoView {
                                         .unwrap_or_else(|_| pc.tool_call.args.to_string());
                                     let path_display = pc.tool_call.canonical_path.as_deref()
                                         .map(shorten_path);
-                                    let on_confirm_deny = on_confirm.clone();
-                                    let on_confirm_once = on_confirm.clone();
-                                    let on_confirm_sess = on_confirm.clone();
+                                    let on_confirm_deny = on_confirm;
+                                    let on_confirm_once = on_confirm;
+                                    let on_confirm_sess = on_confirm;
                                     view! {
                                         <div class="mb-3 animate-in slide-in-from-bottom-2 duration-200">
                                             <div class="border border-amber-300 dark:border-amber-700/50 bg-amber-50 dark:bg-amber-950/20 rounded-2xl shadow-lg overflow-hidden">
@@ -3161,7 +3147,7 @@ fn migrate_legacy_messages(
     };
 
     store
-        .set_json(&format!("session_{}", &session.id), &session)
+        .set_json(format!("session_{}", &session.id), &session)
         .map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     let index = SessionIndex {
@@ -3205,7 +3191,7 @@ pub async fn create_session(title: Option<String>) -> Result<String, ServerFnErr
     store.set_json("session_index", &idx).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     let session = ChatSession::new(session_id.clone());
-    store.set_json(&format!("session_{}", session_id), &session).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    store.set_json(format!("session_{}", session_id), &session).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     Ok(session_id)
 }
@@ -3321,7 +3307,7 @@ pub async fn save_turn_blocks(session_id: String, blocks: Vec<MessageBlock>) -> 
         }
     }
 
-    store.set_json(&format!("session_{}", session_id), &sess).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
+    store.set_json(format!("session_{}", session_id), &sess).map_err(|e| ServerFnError::ServerError(e.to_string()))?;
 
     // Also update session_index
     let mut idx = match store.get_json::<SessionIndex>("session_index") {
