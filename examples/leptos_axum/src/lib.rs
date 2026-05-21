@@ -7,6 +7,8 @@ pub mod types;
 use antigravity_sdk_rust::agent::{Agent, Started};
 #[cfg(feature = "ssr")]
 use std::sync::Arc;
+#[cfg(feature = "ssr")]
+use tokio::sync::Mutex;
 
 /// Shared Agent state accessible from server functions via Leptos context.
 #[cfg(feature = "ssr")]

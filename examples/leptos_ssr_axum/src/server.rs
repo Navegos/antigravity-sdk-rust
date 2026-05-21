@@ -7,7 +7,10 @@ use leptos_wasi::{
 use wasi::exports::http::incoming_handler::Guest;
 use wasi::http::proxy::export;
 
-use crate::app::{shell, App, ClearMessages, GetMessages, SendMessage, SaveChatTurn};
+use crate::app::{
+    shell, App, ClearMessages, GetMessages, SendMessage, SaveChatTurn,
+    ListSessions, CreateSession, GetSessionBlocks, SaveTurnBlocks, DeleteSession,
+};
 
 struct LeptosServer;
 
@@ -40,6 +43,11 @@ async fn handle_request(
         .with_server_fn::<GetMessages, _>()
         .with_server_fn::<ClearMessages, _>()
         .with_server_fn::<SaveChatTurn, _>()
+        .with_server_fn::<ListSessions, _>()
+        .with_server_fn::<CreateSession, _>()
+        .with_server_fn::<GetSessionBlocks, _>()
+        .with_server_fn::<SaveTurnBlocks, _>()
+        .with_server_fn::<DeleteSession, _>()
         .generate_routes(App)
         .handle_with_context(move || shell(leptos_options.clone()), || {})
         .await?;
