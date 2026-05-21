@@ -397,10 +397,19 @@ impl LocalConnectionStrategy {
         })?;
 
         // 1. Spawning localharness subprocess
+        // Explicitly forward SHELL and PATH so the harness can fork /bin/sh for
+        // RUN_COMMAND steps regardless of what working directory is used.
+        // Without this, the harness may fail with "fork/exec /bin/sh: no such file
+        // or directory" when running commands in absolute-path subdirectories.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let path = std::env::var("PATH")
+            .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string());
         let mut child = Command::new(&self.binary_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .env("SHELL", &shell)
+            .env("PATH", &path)
             .spawn()?;
 
         let mut child_stdin = child
@@ -1200,8 +1209,12 @@ fn extract_builtin_tool_call(
             id,
             name: "RUN_COMMAND".to_string(),
             args: serde_json::json!({
-                "command_line": run.command_line,
-                "working_dir": run.working_dir,
+                "command_line":    run.command_line,
+                "working_dir":     run.working_dir,
+                // Include the execution result fields so the frontend
+                // can display stdout/stderr instead of "(no output)".
+                "combined_output": run.combined_output,
+                "exit_code":       run.exit_code,
             }),
             canonical_path: None,
         });

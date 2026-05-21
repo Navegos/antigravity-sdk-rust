@@ -241,26 +241,41 @@ impl Agent<Unstarted> {
                 policy::confirm_run_command(None)
             });
 
-            // Prepend workspace scoping policies if workspaces are configured
-            let workspaces = self.config.workspaces.clone().unwrap_or_else(|| {
-                std::env::current_dir().map_or_else(
-                    |_| Vec::new(),
-                    |cwd| vec![cwd.to_string_lossy().into_owned()],
-                )
+            // Prepend workspace scoping policies ONLY if the caller has not explicitly opted
+            // into allow_all(). When allow_all() is in the policy set, the intent is to
+            // approve every tool call (typically managed by a ConfirmHook instead). In that
+            // case, prepending workspace_only would silently override the user's approval
+            // because Deny policies have higher bucket priority than wildcard Approve policies.
+            //
+            // We detect allow_all by looking for a wildcard Approve policy named "allow_all".
+            // If found, skip the workspace gate entirely.
+            let has_allow_all = final_policies.iter().any(|p| {
+                p.tool == "*"
+                    && p.decision == crate::policy::Decision::Approve
+                    && p.name == "allow_all"
             });
 
-            if !workspaces.is_empty() {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                let app_data_dir = self
-                    .config
-                    .app_data_dir
-                    .clone()
-                    .unwrap_or_else(|| format!("{home}/.gemini/antigravity"));
-                let mut allowed_paths = workspaces;
-                allowed_paths.push(app_data_dir);
-                let mut ws_policies = policy::workspace_only(allowed_paths);
-                ws_policies.append(&mut final_policies);
-                final_policies = ws_policies;
+            if !has_allow_all {
+                let workspaces = self.config.workspaces.clone().unwrap_or_else(|| {
+                    std::env::current_dir().map_or_else(
+                        |_| Vec::new(),
+                        |cwd| vec![cwd.to_string_lossy().into_owned()],
+                    )
+                });
+
+                if !workspaces.is_empty() {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                    let app_data_dir = self
+                        .config
+                        .app_data_dir
+                        .clone()
+                        .unwrap_or_else(|| format!("{home}/.gemini/antigravity"));
+                    let mut allowed_paths = workspaces;
+                    allowed_paths.push(app_data_dir);
+                    let mut ws_policies = policy::workspace_only(allowed_paths);
+                    ws_policies.append(&mut final_policies);
+                    final_policies = ws_policies;
+                }
             }
 
             // Safety policy check: if write tools are enabled, policies cannot be empty
