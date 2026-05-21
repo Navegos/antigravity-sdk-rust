@@ -32,7 +32,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -553,8 +553,8 @@ impl LocalConnectionStrategy {
                     crate::types::ThinkingLevel::Medium => "medium".to_string(),
                     crate::types::ThinkingLevel::High => "high".to_string(),
                 }),
-            enable_url_context: None,
-            enable_google_search: None,
+            enable_url_context: self.gemini_config.enable_url_context,
+            enable_google_search: self.gemini_config.enable_google_search,
         };
 
         let mut proto_workspaces = Vec::new();
@@ -666,6 +666,7 @@ impl LocalConnectionStrategy {
 
         // 7. Setup channels for step stream
         let (step_tx, step_rx) = mpsc::unbounded_channel::<Result<Step, anyhow::Error>>();
+        let client_tool_step_counter = Arc::new(AtomicU32::new(50_000));
 
         let is_idle = Arc::new(AtomicBool::new(false));
         let parent_idle = Arc::new(Mutex::new(false));
@@ -1027,15 +1028,37 @@ impl LocalConnectionStrategy {
                                             let conn_ws_tx = conn_ws_tx.clone();
                                             let tool_runner = tool_runner.clone();
                                             let hook_runner = hook_runner.clone();
+                                            let step_tx_clone = step_tx.clone();
+                                            let learned_id_clone = conn_learned_id.clone();
+                                            let counter = client_tool_step_counter.clone();
                                             tokio::spawn(async move {
                                                 let args: Value = serde_json::from_str(&tool_call.arguments_json.clone().unwrap_or_default()).unwrap_or(Value::Null);
                                                 let tc = ToolCall {
                                                     id: tool_call.id.clone().unwrap_or_default(),
                                                     name: tool_call.name.clone().unwrap_or_default(),
-                                                    args,
+                                                    args: args.clone(),
                                                     canonical_path: None,
                                                 };
                                                 tracing::debug!("ToolCall event received: id={}, name={}", tc.id, tc.name);
+
+                                                // Emit ACTIVE step so the UI can show a tool card
+                                                let synth_idx = counter.fetch_add(1, Ordering::SeqCst);
+                                                let traj_id = learned_id_clone.get()
+                                                    .cloned()
+                                                    .unwrap_or_default();
+                                                let active_step = Step {
+                                                    id: tc.id.clone(),
+                                                    step_index: synth_idx,
+                                                    r#type: StepType::ToolCall,
+                                                    source: StepSource::Model,
+                                                    target: StepTarget::Environment,
+                                                    status: StepStatus::Active,
+                                                    content: tc.name.clone(),
+                                                    tool_calls: vec![tc.clone()],
+                                                    trajectory_id: traj_id.clone(),
+                                                    ..Default::default()
+                                                };
+                                                let _ = step_tx_clone.send(Ok(active_step));
 
                                                 let allow = if let Some(runner) = hook_runner.as_ref() {
                                                     let res = runner.dispatch_pre_tool_call(&tc).await.map_or(true, |res| res.allow);
@@ -1046,6 +1069,22 @@ impl LocalConnectionStrategy {
                                                 };
 
                                                 if !allow {
+                                                    // Emit ERROR step for denied tool call
+                                                    let denied_step = Step {
+                                                        id: tc.id.clone(),
+                                                        step_index: synth_idx,
+                                                        r#type: StepType::ToolCall,
+                                                        source: StepSource::Model,
+                                                        target: StepTarget::Environment,
+                                                        status: StepStatus::Error,
+                                                        content: tc.name.clone(),
+                                                        error: "Execution denied by hook policy".to_string(),
+                                                        tool_calls: vec![tc.clone()],
+                                                        trajectory_id: traj_id,
+                                                        ..Default::default()
+                                                    };
+                                                    let _ = step_tx_clone.send(Ok(denied_step));
+
                                                     let resp = ToolResponse {
                                                         id: tool_call.id.clone(),
                                                         response_json: Some("{\"error\": \"Execution denied by hook policy\"}".to_string()),
@@ -1070,7 +1109,7 @@ impl LocalConnectionStrategy {
 
                                                 if let Some(ref runner) = tool_runner {
                                                     tracing::debug!("Executing tool {} with args: {:?}", tc.name, tc.args);
-                                                    let results = runner.process_tool_calls(vec![tc]).await;
+                                                    let results = runner.process_tool_calls(vec![tc.clone()]).await;
                                                     if let Some(r) = results.into_iter().next() {
                                                         result = r;
                                                     }
@@ -1089,6 +1128,32 @@ impl LocalConnectionStrategy {
                                                 } else if let Some(runner) = hook_runner.as_ref() {
                                                     let _ = runner.dispatch_post_tool_call(&result).await;
                                                 }
+
+                                                // Emit DONE or ERROR step with the execution result
+                                                let (final_status, error_msg, result_args) = if result.error.is_some() {
+                                                    (StepStatus::Error, result.error.clone().unwrap_or_default(), Value::Null)
+                                                } else {
+                                                    (StepStatus::Done, String::new(), result.result.clone().unwrap_or(Value::Null))
+                                                };
+                                                let done_step = Step {
+                                                    id: tc.id.clone(),
+                                                    step_index: synth_idx,
+                                                    r#type: StepType::ToolCall,
+                                                    source: StepSource::Model,
+                                                    target: StepTarget::Environment,
+                                                    status: final_status,
+                                                    content: tc.name.clone(),
+                                                    error: error_msg,
+                                                    tool_calls: vec![ToolCall {
+                                                        id: tc.id.clone(),
+                                                        name: tc.name.clone(),
+                                                        args: result_args,
+                                                        canonical_path: None,
+                                                    }],
+                                                    trajectory_id: traj_id,
+                                                    ..Default::default()
+                                                };
+                                                let _ = step_tx_clone.send(Ok(done_step));
 
                                                 // The Go harness expects responseJson to always be a JSON object.
                                                 // Wrap non-object values (string, number, array, etc.) under "result".
@@ -1193,6 +1258,17 @@ fn extract_builtin_tool_call(
     let step_idx = step_update.step_index.unwrap_or(0);
     let id = format!("{traj_id}_{step_idx}");
 
+    if step_update.invoke_subagent.is_some() {
+        return Some(ToolCall {
+            id,
+            name: "START_SUBAGENT".to_string(),
+            args: serde_json::json!({
+                "prompt": step_update.request_text.clone().unwrap_or_default()
+            }),
+            canonical_path: None,
+        });
+    }
+
     if let Some(ref fd) = step_update.find_file {
         return Some(ToolCall {
             id,
@@ -1250,6 +1326,23 @@ fn extract_builtin_tool_call(
                 "file_path": edit.file_path,
             }),
             canonical_path: edit.file_path.clone(),
+        });
+    }
+    if let Some(ref search) = step_update.search_directory {
+        // The harness puts grep/search results into `step_update.text`.
+        // Pack them into `args.output` so the frontend can display them,
+        // mirroring how RUN_COMMAND packs `combined_output`.
+        return Some(ToolCall {
+            id,
+            name: "SEARCH_DIR".to_string(),
+            args: serde_json::json!({
+                "directory_path": search.directory_path,
+                "query": search.query,
+                "num_results": search.num_results,
+                // Actual grep results from the harness
+                "output": step_update.text,
+            }),
+            canonical_path: search.directory_path.clone(),
         });
     }
     None
