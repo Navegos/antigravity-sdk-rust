@@ -92,7 +92,14 @@ fn main() {
         val
     };
 
-    // 3. Update Cargo.toml content
+    // 3. Guard: skip if version is already at the target
+    if target_version == current_version {
+        println!("⚠️  Version is already {} — nothing to bump.", current_version);
+        println!("Run `just version` (no argument) to auto-bump patch, or specify a higher version.");
+        return;
+    }
+
+    // 4. Update Cargo.toml content
     let mut new_lines = lines.clone();
     let old_line = lines[version_line_idx];
     let new_line = if let Some(start) = old_line.find('"') {
