@@ -103,6 +103,12 @@ pub struct GeminiConfig {
     /// Model configurations.
     #[serde(default)]
     pub models: ModelConfig,
+    /// Option to enable Google Search grounding tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_google_search: Option<bool>,
+    /// Option to enable URL context resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_url_context: Option<bool>,
 }
 
 /// A structured section appended to system instructions.
@@ -691,6 +697,8 @@ mod tests {
         assert!(config.api_key.is_none());
         assert_eq!(config.models.default.name, DEFAULT_MODEL);
         assert!(config.models.default.generation.thinking_level.is_none());
+        assert!(config.enable_google_search.is_none());
+        assert!(config.enable_url_context.is_none());
     }
 
     #[test]

@@ -34,6 +34,7 @@ async fn test_agent_chat_integration() {
             },
             image_generation: ModelEntry::default(),
         },
+        ..Default::default()
     };
 
     // Disable write tools to avoid policy assertion issues, or register allow_all policy
@@ -134,6 +135,7 @@ async fn test_agent_real_chat_integration() {
             },
             image_generation: ModelEntry::default(),
         },
+        ..Default::default()
     };
 
     let tmp_dir = std::env::temp_dir().join(format!(
