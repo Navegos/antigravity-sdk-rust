@@ -304,7 +304,7 @@ async fn build_session(
          NEVER use file:// or file:/// URI prefixes — they are not valid filesystem paths and \
          will cause tool failures. Always write paths as: /absolute/path/to/file, never as \
          file:///absolute/path/to/file. \
-         Use tools proactively: list directory contents, read files, search code, run commands. \
+         Only use filesystem tools (like listing directory contents, reading/searching files, and running commands) when relevant to the user request. Do not access the workspace filesystem or run directory listings for queries that only need web search or general information. \
          Think step-by-step and show your reasoning. \
          Use markdown formatting for all responses including code blocks."
     );
@@ -533,7 +533,12 @@ async fn chat_stream_handler(
                             }
 
                             // ── text token delta ───────────────────────────────────
-                            if step.source == StepSource::Model && !step.content_delta.is_empty() {
+                            // Skip token emission for ToolCall steps — their content_delta
+                            // is the tool label (e.g. "Workspace directory listing"), not
+                            // assistant prose. The label is passed via tool_start instead.
+                            if step.source == StepSource::Model && !step.content_delta.is_empty()
+                                && step.r#type != StepType::ToolCall
+                            {
                                 let _ = tx.send(Ok(sse_event("token", serde_json::json!({
                                     "step_index": step_index,
                                     "text": step.content_delta,
@@ -565,6 +570,24 @@ async fn chat_stream_handler(
                                     } else if step.status == StepStatus::Done
                                         || step.status == StepStatus::Error
                                     {
+                                        // If this tool was never seen as Active (e.g. auto-approved
+                                        // non-WRITE_TOOLS like LIST_DIR that go straight from
+                                        // WaitingForUser → Done), emit a synthetic tool_start first
+                                        // so the frontend creates a proper ToolCallView card.
+                                        if seen_tool_ids.insert(call.id.clone()) {
+                                            tracing::info!(
+                                                tool = %call.name, id = %call.id,
+                                                "stream-handler: synthetic tool_start (skipped Active)"
+                                            );
+                                            let _ = tx.send(Ok(sse_event("tool_start", serde_json::json!({
+                                                "id":             call.id,
+                                                "name":           call.name,
+                                                "args":           call.args,
+                                                "canonical_path": call.canonical_path,
+                                                "label":          step.content,
+                                                "trajectory_id":  &trajectory_id,
+                                            })))).await;
+                                        }
                                         tracing::info!(
                                             tool   = %call.name,
                                             status = ?step.status,

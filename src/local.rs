@@ -1345,6 +1345,16 @@ fn extract_builtin_tool_call(
             canonical_path: search.directory_path.clone(),
         });
     }
+    if let Some(ref list) = step_update.list_directory {
+        return Some(ToolCall {
+            id,
+            name: "LIST_DIR".to_string(),
+            args: serde_json::json!({
+                "directory_path": list.directory_path,
+            }),
+            canonical_path: list.directory_path.clone(),
+        });
+    }
     None
 }
 

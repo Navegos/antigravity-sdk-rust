@@ -1235,6 +1235,16 @@ fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
             canonical_path: search.directory_path.clone(),
         });
     }
+    if let Some(ref list) = step_update.list_directory {
+        return Some(ToolCall {
+            id,
+            name: "LIST_DIR".to_string(),
+            args: serde_json::json!({
+                "directory_path": list.directory_path,
+            }),
+            canonical_path: list.directory_path.clone(),
+        });
+    }
     None
 }
 
@@ -1260,8 +1270,8 @@ fn extract_tool_result(step_update: &StepUpdate) -> Option<ToolResult> {
 mod tests {
     use super::*;
     use crate::proto::localharness::{
-        ActionCreateFile, ActionEditFile, ActionFindFile, ActionRunCommand, ActionViewFile,
-        StepUpdate,
+        ActionCreateFile, ActionEditFile, ActionFindFile, ActionListDirectory, ActionRunCommand,
+        ActionViewFile, StepUpdate,
     };
     use crate::types::{CapabilitiesConfig, GeminiConfig};
     use futures_util::{SinkExt, StreamExt};
@@ -1442,6 +1452,27 @@ mod tests {
             tc.args,
             serde_json::json!({
                 "prompt": "Do a subtask"
+            })
+        );
+
+        // 5.6 ListDirectory
+        let step_update_list = StepUpdate {
+            trajectory_id: Some("traj_1".to_string()),
+            step_index: Some(8),
+            list_directory: Some(ActionListDirectory {
+                directory_path: Some("list_path".to_string()),
+                results: vec![],
+            }),
+            ..Default::default()
+        };
+        let tc = extract_builtin_tool_call(&step_update_list).unwrap();
+        assert_eq!(tc.id, "traj_1_8");
+        assert_eq!(tc.name, "LIST_DIR");
+        assert_eq!(tc.canonical_path, Some("list_path".to_string()));
+        assert_eq!(
+            tc.args,
+            serde_json::json!({
+                "directory_path": "list_path"
             })
         );
 
