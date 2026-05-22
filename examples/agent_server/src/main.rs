@@ -807,6 +807,61 @@ async fn resolve_folder_handler(
 }
 
 // ---------------------------------------------------------------------------
+// GET /media — serve generated images and other local files
+// ---------------------------------------------------------------------------
+
+/// Query parameters for `GET /media`.
+#[derive(Debug, Deserialize)]
+struct MediaParams {
+    path: String,
+}
+
+async fn media_handler(
+    axum::extract::Query(params): axum::extract::Query<MediaParams>,
+) -> impl IntoResponse {
+    use axum::http::header;
+
+    let path = std::path::Path::new(&params.path);
+
+    // Security: only serve files, not directories or symlinks to directories
+    if !path.is_file() {
+        return (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain")],
+            Vec::new(),
+        )
+            .into_response();
+    }
+
+    let content_type = match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        _ => "application/octet-stream",
+    };
+
+    match tokio::fs::read(path).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, content_type)],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("media_handler: failed to read {:?}: {e}", path);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain")],
+                Vec::new(),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /halt
 // ---------------------------------------------------------------------------
 
@@ -1109,6 +1164,7 @@ async fn main() {
         .route("/confirm", post(confirm_handler))
         .route("/workspace", get(get_workspace_handler).post(set_workspace_handler))
         .route("/resolve/folder", get(resolve_folder_handler))
+        .route("/media", get(media_handler))
         .route("/health", get(health_handler))
         .layer(cors)
         .with_state(app_state.clone());

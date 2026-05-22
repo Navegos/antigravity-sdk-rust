@@ -1251,6 +1251,7 @@ impl StepTracker {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn extract_builtin_tool_call(
     step_update: &crate::proto::localharness::StepUpdate,
 ) -> Option<ToolCall> {
@@ -1353,6 +1354,18 @@ fn extract_builtin_tool_call(
                 "directory_path": list.directory_path,
             }),
             canonical_path: list.directory_path.clone(),
+        });
+    }
+    if let Some(ref img_gen) = step_update.generate_image {
+        return Some(ToolCall {
+            id,
+            name: "GENERATE_IMAGE".to_string(),
+            args: serde_json::json!({
+                "prompt": img_gen.prompt,
+                "image_paths": img_gen.image_paths,
+                "image_name": img_gen.image_name,
+            }),
+            canonical_path: None,
         });
     }
     None

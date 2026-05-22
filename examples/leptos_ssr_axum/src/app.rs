@@ -90,7 +90,11 @@ fn UserMessageView(content: String) -> impl IntoView {
 /// Renders assistant markdown response (left-aligned).
 #[component]
 fn AssistantMessageView(content: String) -> impl IntoView {
-    let html_content = render_markdown(&content);
+    let ws = use_context::<ReadSignal<Option<String>>>()
+        .map(|sig| sig.get())
+        .flatten();
+    let agent_url = get_agent_server_url_any();
+    let html_content = render_markdown(&content, ws.as_deref(), &agent_url);
     view! {
         <div class="assistant-message-container flex justify-start w-full gap-4">
             <div class="flex-shrink-0 w-8 h-8 rounded-full bg-black dark:bg-white text-white dark:text-black flex items-center justify-center text-sm font-semibold select-none shadow-md">
@@ -118,7 +122,11 @@ fn ThinkingView(content: String, is_streaming: bool) -> impl IntoView {
     
     // Render the thought content as markdown so headers, code blocks, bullets etc.
     // all display properly inside the collapsible panel.
-    let html_content = render_markdown(&content);
+    let ws = use_context::<ReadSignal<Option<String>>>()
+        .map(|sig| sig.get())
+        .flatten();
+    let agent_url = get_agent_server_url_any();
+    let html_content = render_markdown(&content, ws.as_deref(), &agent_url);
     let word_count = content.split_whitespace().count();
     let char_count = content.len();
     let stats = format!("{} chars \u{00B7} {} words", char_count, word_count);
@@ -329,6 +337,13 @@ fn ToolCallView(
         if let Some(cmd_str) = cmd {
             view! { <span class="font-mono text-[10px] opacity-60 truncate max-w-[220px]">{cmd_str}</span> }.into_any()
         } else { ().into_any() }
+    } else if name == "GENERATE_IMAGE" {
+        let prompt = args.get("prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| if s.len() > 50 { format!("\"{}…\"", &s[..50]) } else { format!("\"{}\"", s) });
+        if let Some(p_str) = prompt {
+            view! { <span class="font-mono text-[10px] opacity-60 truncate max-w-[220px]">{p_str}</span> }.into_any()
+        } else { ().into_any() }
     } else { ().into_any() };
 
     view! {
@@ -437,6 +452,17 @@ fn ToolResultView(
     result: Option<serde_json::Value>,
     error: Option<String>,
 ) -> impl IntoView {
+    let ws = use_context::<ReadSignal<Option<String>>>()
+        .map(|sig| sig.get())
+        .flatten();
+
+    // ── GENERATE_IMAGE: extract image_paths for inline rendering ────────
+    let image_paths: Vec<String> = if name == "GENERATE_IMAGE" {
+        extract_image_paths_from_result(result.as_ref())
+    } else {
+        Vec::new()
+    };
+
     // Extract the most human-readable output from the result JSON.
     // For RUN_COMMAND: combined_output (stdout/stderr) + exit code.
     // For file tools: success note or content preview.
@@ -477,6 +503,17 @@ fn ToolResultView(
             } else {
                 serde_json::to_string_pretty(res).unwrap_or_else(|_| res.to_string())
             }
+        } else if name == "GENERATE_IMAGE" {
+            // Image rendering is handled separately below; show image_name as text
+            let img_name = res.get("image_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("image");
+            let count = image_paths.len();
+            if count > 0 {
+                format!("Generated {} image(s): {}", count, img_name)
+            } else {
+                "(no images generated)".to_string()
+            }
         } else if let Some(s) = res.as_str() {
             s.to_string()
         } else {
@@ -496,8 +533,75 @@ fn ToolResultView(
         "text-gray-700 dark:text-gray-300 bg-gray-50/50 dark:bg-[#1a1a1a]/20 border-t border-gray-200 dark:border-gray-800/30"
     };
 
+    // ── GENERATE_IMAGE with images: render an inline image gallery ──────
+    let is_image_result = name == "GENERATE_IMAGE" && !image_paths.is_empty() && !has_error;
+
     view! {
-        {if is_diff {
+        {if is_image_result {
+            let paths = image_paths.clone();
+            view! {
+                <div class="generate-image-result w-full mb-4 border border-violet-200/60 dark:border-violet-900/40 rounded-2xl overflow-hidden shadow-md">
+                    // Header
+                    <div class="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-violet-50 to-fuchsia-50 dark:from-violet-950/20 dark:to-fuchsia-950/20 border-b border-violet-200/40 dark:border-violet-800/30 select-none">
+                        <svg class="w-4 h-4 text-violet-500 dark:text-violet-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
+                        </svg>
+                        <span class="font-bold tracking-wide text-[10px] uppercase text-violet-700 dark:text-violet-300">"Generated Image"</span>
+                        <span class="text-[9px] px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-900/40 text-violet-600 dark:text-violet-400 font-semibold">
+                            {format!("{} file(s)", paths.len())}
+                        </span>
+                    </div>
+                    // Image grid
+                    <div class="p-4 bg-gray-50/30 dark:bg-[#141414]/40">
+                        <div class="grid grid-cols-1 gap-4">
+                            {paths.into_iter().map(|path| {
+                                // Build the image source URL via agent server /media endpoint.
+                                let abs_path = if !path.starts_with('/') {
+                                    if let Some(ref ws_str) = ws {
+                                        format!("{}/{}", ws_str.trim_end_matches('/'), path)
+                                    } else {
+                                        path.clone()
+                                    }
+                                } else {
+                                    path.clone()
+                                };
+
+                                let base = get_agent_server_url_any();
+                                let encoded = percent_encode_path(&abs_path);
+                                let img_src = format!("{}/media?path={}", base, encoded);
+
+                                let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
+
+                                view! {
+                                    <div class="group relative rounded-xl overflow-hidden border border-gray-200/60 dark:border-gray-800/50 shadow-sm hover:shadow-lg transition-all duration-300 bg-white dark:bg-[#1a1a1a]">
+                                        <img
+                                            src=img_src.clone()
+                                            alt=file_name.clone()
+                                            class="w-full h-auto max-h-[500px] object-contain bg-[#f5f5f5] dark:bg-[#0d0d0d]"
+                                            loading="lazy"
+                                        />
+                                        // Overlay with filename and actions on hover
+                                        <div class="absolute bottom-0 left-0 right-0 flex items-center justify-between px-3 py-2 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-200">
+                                            <span class="text-[10px] font-mono text-white/90 truncate max-w-[60%]">{file_name.clone()}</span>
+                                            <div class="flex items-center gap-2">
+                                                <a
+                                                    href=img_src
+                                                    target="_blank"
+                                                    rel="noopener"
+                                                    class="text-[9px] px-2 py-1 rounded bg-white/20 text-white hover:bg-white/30 transition-colors font-semibold"
+                                                >
+                                                    "Open"
+                                                </a>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+                            }).collect::<Vec<_>>()}
+                        </div>
+                    </div>
+                </div>
+            }.into_any()
+        } else if is_diff {
             view! {
                 <DiffView name=name.clone() content=result_str.clone() />
             }.into_any()
@@ -532,6 +636,7 @@ fn ToolResultView(
         }}
     }
 }
+
 
 /// Interactive form that pauses the stream for agent questions.
 #[component]
@@ -1403,6 +1508,7 @@ fn ChatPage() -> impl IntoView {
     let (open_folder_input, set_open_folder_input) = signal(String::new());
     let (open_folder_error, set_open_folder_error) = signal(Option::<String>::None);
     let (workspace_path, set_workspace_path) = signal(Option::<String>::None);
+    provide_context(workspace_path);
     // Silence SSR unused-variable warnings for signals only read/written inside #[cfg(feature = "hydrate")]
     let _ = &open_folder_input;
     let _ = &set_workspace_path;
@@ -1546,8 +1652,9 @@ fn ChatPage() -> impl IntoView {
     // Handle switching between sessions: fetch blocks and set the correct block counter
     Effect::new(move |_| {
         if let Some(sid) = active_session_id.get() {
+            let sid_blocks = sid.clone();
             spawn_local(async move {
-                if let Ok(b) = get_session_blocks(sid).await {
+                if let Ok(b) = get_session_blocks(sid_blocks).await {
                     set_blocks.set(b.clone());
                     // Sync monotonic counter to avoid collisions
                     let max_id = b.iter().map(|block| match block {
@@ -1566,6 +1673,24 @@ fn ChatPage() -> impl IntoView {
                     set_block_id_counter.set(max_id);
                 }
             });
+            // Also sync workspace path from agent server
+            #[cfg(feature = "hydrate")]
+            {
+                let sid_ws = sid.clone();
+                spawn_local(async move {
+                    let agent_url = get_agent_server_url();
+                    let url = format!("{}/workspace?session_id={}", agent_url, sid_ws);
+                    if let Ok(resp) = gloo_net::http::Request::get(&url).send().await {
+                        if resp.ok() {
+                            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                                if let Some(ws) = body["workspace"].as_str() {
+                                    set_workspace_path.set(Some(ws.to_string()));
+                                }
+                            }
+                        }
+                    }
+                });
+            }
         }
     });
 
@@ -3819,11 +3944,91 @@ pub async fn clear_messages() -> Result<(), ServerFnError<String>> {
 }
 
 /// Parse markdown text into HTML string.
-fn render_markdown(markdown: &str) -> String {
+/// When `workspace_path` is provided, relative image URLs are rewritten to
+/// proxy through the agent server's /media endpoint.
+/// Absolute filesystem paths (starting with `/`) are also routed through /media
+/// since the browser cannot access the local filesystem directly.
+fn render_markdown(markdown: &str, workspace_path: Option<&str>, agent_server_url: &str) -> String {
     let parser = pulldown_cmark::Parser::new_ext(markdown, pulldown_cmark::Options::all());
+
+    let mapped = parser.map(|event| {
+        match event {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image {
+                link_type, dest_url, title, id,
+            }) => {
+                let url_str = dest_url.as_ref();
+                let rewritten = if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                    // Fully qualified URL → leave alone
+                    dest_url
+                } else if url_str.starts_with('/') {
+                    // Absolute filesystem path → route through /media directly
+                    let enc = percent_encode_path(url_str);
+                    format!("{}/media?path={}", agent_server_url.trim_end_matches('/'), enc)
+                        .into()
+                } else {
+                    // Relative path → prepend workspace, then route through /media
+                    if let Some(ws) = workspace_path {
+                        let abs = format!("{}/{}", ws.trim_end_matches('/'), url_str);
+                        let enc = percent_encode_path(&abs);
+                        format!("{}/media?path={}", agent_server_url.trim_end_matches('/'), enc)
+                            .into()
+                    } else {
+                        dest_url
+                    }
+                };
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image {
+                    link_type, dest_url: rewritten, title, id,
+                })
+            }
+            other => other,
+        }
+    });
+
     let mut html_output = String::new();
-    pulldown_cmark::html::push_html(&mut html_output, parser);
+    pulldown_cmark::html::push_html(&mut html_output, mapped);
     html_output
+}
+
+/// Extract image file paths from a GENERATE_IMAGE tool result.
+///
+/// Strategy:
+/// 1. Try `result["image_paths"]` array (primary — populated by harness on Done step)
+/// 2. Fallback: scan the result string value for absolute paths ending in image extensions
+fn extract_image_paths_from_result(result: Option<&serde_json::Value>) -> Vec<String> {
+    let res = match result {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+
+    // Strategy 1: structured image_paths array
+    if let Some(arr) = res.get("image_paths").and_then(|v| v.as_array()) {
+        let paths: Vec<String> = arr.iter()
+            .filter_map(|p| p.as_str().map(String::from))
+            .filter(|p| !p.is_empty())
+            .collect();
+        if !paths.is_empty() {
+            return paths;
+        }
+    }
+
+    // Strategy 2: scan text for absolute paths ending in image extensions
+    let text = res.as_str()
+        .or_else(|| res.get("text").and_then(|v| v.as_str()))
+        .unwrap_or("");
+
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let image_extensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"];
+    text.split_whitespace()
+        .filter(|word| {
+            let w = word.trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == '[' || c == ']');
+            w.starts_with('/')
+                && image_extensions.iter().any(|ext| w.to_lowercase().ends_with(ext))
+        })
+        .map(|word| word.trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == '[' || c == ']').to_string())
+        .collect()
 }
 
 /// Save a single completed turn (user message & assistant response) to KV.
@@ -4142,3 +4347,116 @@ fn get_agent_server_url_encoded(val: &str) -> String {
     js_sys::encode_uri_component(val).as_string().unwrap_or_default()
 }
 
+/// Returns the agent server URL, compiling on both SSR and hydrate targets.
+fn get_agent_server_url_any() -> String {
+    #[cfg(feature = "ssr")]
+    {
+        spin_sdk::variables::get("agent_server_url")
+            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        #[cfg(feature = "hydrate")]
+        {
+            get_agent_server_url()
+        }
+        #[cfg(not(feature = "hydrate"))]
+        {
+            "http://127.0.0.1:8080".to_string()
+        }
+    }
+}
+
+/// Pure-Rust percent-encoding for file paths used in query parameters.
+fn percent_encode_path(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.as_bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
+            | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                encoded.push(*byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_percent_encode_path() {
+        assert_eq!(percent_encode_path("foo/bar.png"), "foo/bar.png");
+        assert_eq!(percent_encode_path("foo space/bar.png"), "foo%20space/bar.png");
+    }
+
+    #[test]
+    fn test_render_markdown_rewrite_relative() {
+        let markdown = "![Cyber Dragon](dragon_cyberpunk_123.png)";
+        let workspace = Some("/Users/uriah/workspace");
+        let agent_url = "http://127.0.0.1:8080";
+        let html = render_markdown(markdown, workspace, agent_url);
+        // Relative path should be rewritten with workspace prepended
+        assert!(html.contains("src=\"http://127.0.0.1:8080/media?path=/Users/uriah/workspace/dragon_cyberpunk_123.png\""));
+    }
+
+    #[test]
+    fn test_render_markdown_rewrite_absolute_filesystem() {
+        let markdown = "![Core Dragon](/Users/uriah/.gemini/antigravity/brain/abc123/dragon_logo_core.png)";
+        let workspace = Some("/Users/uriah/workspace");
+        let agent_url = "http://127.0.0.1:8080";
+        let html = render_markdown(markdown, workspace, agent_url);
+        // Absolute filesystem path should be routed through /media WITHOUT workspace prepend
+        assert!(html.contains("src=\"http://127.0.0.1:8080/media?path=/Users/uriah/.gemini/antigravity/brain/abc123/dragon_logo_core.png\""));
+    }
+
+    #[test]
+    fn test_render_markdown_leaves_external_urls() {
+        let markdown = "![External](https://example.com/foo.png)";
+        let html = render_markdown(markdown, Some("/ws"), "http://127.0.0.1:8080");
+        // External URLs should NOT be rewritten
+        assert!(html.contains("src=\"https://example.com/foo.png\""));
+    }
+
+    #[test]
+    fn test_extract_image_paths_structured() {
+        let result = serde_json::json!({
+            "prompt": "a dragon",
+            "image_paths": ["/Users/uriah/brain/dragon.png"],
+            "image_name": "dragon"
+        });
+        let paths = extract_image_paths_from_result(Some(&result));
+        assert_eq!(paths, vec!["/Users/uriah/brain/dragon.png"]);
+    }
+
+    #[test]
+    fn test_extract_image_paths_empty_array_fallback_text() {
+        // When image_paths is empty, fall back to scanning the string value
+        let result = serde_json::Value::String(
+            "Generated image saved to /Users/uriah/brain/dragon.png successfully".to_string()
+        );
+        let paths = extract_image_paths_from_result(Some(&result));
+        assert_eq!(paths, vec!["/Users/uriah/brain/dragon.png"]);
+    }
+
+    #[test]
+    fn test_extract_image_paths_empty_array_no_text() {
+        let result = serde_json::json!({
+            "prompt": "a dragon",
+            "image_paths": [],
+            "image_name": "dragon"
+        });
+        let paths = extract_image_paths_from_result(Some(&result));
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_extract_image_paths_none() {
+        let paths = extract_image_paths_from_result(None);
+        assert!(paths.is_empty());
+    }
+}

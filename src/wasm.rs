@@ -1147,6 +1147,7 @@ impl Connection for WasmConnection {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
     let traj_id = step_update.trajectory_id.clone().unwrap_or_default();
     let step_idx = step_update.step_index.unwrap_or(0);
@@ -1245,6 +1246,18 @@ fn extract_builtin_tool_call(step_update: &StepUpdate) -> Option<ToolCall> {
             canonical_path: list.directory_path.clone(),
         });
     }
+    if let Some(ref img_gen) = step_update.generate_image {
+        return Some(ToolCall {
+            id,
+            name: "GENERATE_IMAGE".to_string(),
+            args: serde_json::json!({
+                "prompt": img_gen.prompt,
+                "image_paths": img_gen.image_paths,
+                "image_name": img_gen.image_name,
+            }),
+            canonical_path: None,
+        });
+    }
     None
 }
 
@@ -1270,8 +1283,8 @@ fn extract_tool_result(step_update: &StepUpdate) -> Option<ToolResult> {
 mod tests {
     use super::*;
     use crate::proto::localharness::{
-        ActionCreateFile, ActionEditFile, ActionFindFile, ActionListDirectory, ActionRunCommand,
-        ActionViewFile, StepUpdate,
+        ActionCreateFile, ActionEditFile, ActionFindFile, ActionGenerateImage, ActionListDirectory,
+        ActionRunCommand, ActionViewFile, StepUpdate,
     };
     use crate::types::{CapabilitiesConfig, GeminiConfig};
     use futures_util::{SinkExt, StreamExt};
@@ -1475,6 +1488,25 @@ mod tests {
                 "directory_path": "list_path"
             })
         );
+
+        // 5.7 GenerateImage
+        let step_update_gen = StepUpdate {
+            trajectory_id: Some("traj_1".to_string()),
+            step_index: Some(9),
+            generate_image: Some(ActionGenerateImage {
+                prompt: Some("a gold dragon logo".to_string()),
+                image_paths: vec!["/tmp/dragon.png".to_string()],
+                image_name: Some("dragon_logo".to_string()),
+            }),
+            ..Default::default()
+        };
+        let tc = extract_builtin_tool_call(&step_update_gen).unwrap();
+        assert_eq!(tc.id, "traj_1_9");
+        assert_eq!(tc.name, "GENERATE_IMAGE");
+        assert_eq!(tc.canonical_path, None);
+        assert_eq!(tc.args["prompt"], "a gold dragon logo");
+        assert_eq!(tc.args["image_name"], "dragon_logo");
+        assert_eq!(tc.args["image_paths"][0], "/tmp/dragon.png");
 
         // 6. None
         let step_update_none = StepUpdate {
