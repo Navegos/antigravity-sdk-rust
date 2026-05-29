@@ -137,11 +137,11 @@ a multi-phase startup sequence:
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │  1. Spawn localharness subprocess (stdin/stdout/stderr)      │
-│  2. Length-prefixed protobuf handshake over stdin/stdout      │
+│  2. Length-prefixed protobuf handshake over stdin/stdout     │
 │     ├─ Send: InputConfig { storage_dir, client_info }        │
 │     └─ Recv: OutputConfig { port, api_key }                  │
-│  3. WebSocket upgrade to ws://localhost:{port}/               │
-│     └─ Header: x-goog-api-key = {harness_api_key}           │
+│  3. WebSocket upgrade to ws://localhost:{port}/              │
+│     └─ Header: x-goog-api-key = {harness_api_key}            │
 │  4. Send InitializeConversationEvent with HarnessConfig      │
 │     ├─ GeminiConfig (model, API key, thinking level)         │
 │     ├─ SystemInstructions (custom or appended)               │
