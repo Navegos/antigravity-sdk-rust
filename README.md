@@ -256,6 +256,23 @@ The SDK has been fully refactored to use native async traits (stable since Rust 
 
 This project uses [just](https://github.com/casey/just) to manage development tasks.
 
+- **Help / List Commands**: List all available `just` recipes.
+  ```sh
+  just
+  # or
+  just help
+  ```
+- **Run SDK Examples**: Start any of the SDK examples by directory or file name (handles both file and folder examples, converting dashes to underscores automatically).
+  ```sh
+  # Run the hello_world.rs console example
+  just example hello_world
+
+  # Run the agent_server HTTP sidecar example
+  just example agent_server
+
+  # Run the leptos_ssr_axum edge web example
+  just example leptos_ssr_axum
+  ```
 - **Check Code Quality**: Run all style, lint, and test checks.
   ```sh
   just check

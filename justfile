@@ -1,3 +1,11 @@
+# List all available commands
+default:
+    @just --list
+
+# List all available commands
+help:
+    @just --list
+
 # Run formatting, clippy lint checks, and unit/integration tests
 check:
     cargo fmt --all -- --check
@@ -21,4 +29,36 @@ publish: check
 # Start localharness on the host
 start-harness:
     cargo run --bin start-harness
+
+# Run a specific SDK example (e.g. `just example hello_world`, `just example agent_server`)
+example name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Normalize dashes to underscores
+    name_clean=$(echo "{{name}}" | tr '-' '_')
+    case "$name_clean" in
+        "agent_server")
+            echo "Starting agent_server sidecar..."
+            cargo run --manifest-path examples/agent_server/Cargo.toml
+            ;;
+        "leptos_axum")
+            echo "Starting leptos_axum example..."
+            cd examples/leptos_axum && cargo leptos serve
+            ;;
+        "leptos_ssr_axum")
+            echo "Starting leptos_ssr_axum example..."
+            cd examples/leptos_ssr_axum && spin build --up
+            ;;
+        *)
+            if [ -f "examples/${name_clean}.rs" ]; then
+                cargo run --example "${name_clean}"
+            else
+                echo "Error: Example '${name_clean}' not found."
+                echo "Available directory examples: agent_server, leptos_axum, leptos_ssr_axum"
+                echo "Available file examples: hello_world, custom_tools, persistence, policies, streaming, structured_output, subagents"
+                exit 1
+            fi
+            ;;
+    esac
+
 
