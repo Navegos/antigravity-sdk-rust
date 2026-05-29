@@ -30,8 +30,11 @@ esac
 echo "Fetching localharness v${VERSION} for ${PLATFORM}..."
 
 # Query the PyPI JSON API to locate the download URL for the wheel matching our platform
-JSON_DATA=$(curl -s "https://pypi.org/pypi/google-antigravity/${VERSION}/json")
-DOWNLOAD_URL=$(echo "$JSON_DATA" | grep -o 'https://[^"]*\.whl' | grep "$PLATFORM" | head -n 1 || true)
+JSON_DATA=$(curl -sSf "https://pypi.org/pypi/google-antigravity/${VERSION}/json" || true)
+DOWNLOAD_URL=""
+if [ -n "$JSON_DATA" ]; then
+    DOWNLOAD_URL=$(echo "$JSON_DATA" | grep -o 'https://[^"]*\.whl' | grep "$PLATFORM" | head -n 1 || true)
+fi
 
 if [ -z "$DOWNLOAD_URL" ]; then
     # Fallback to standard URL construction if grep parsing fails
@@ -41,7 +44,11 @@ fi
 WHEEL_FILE="google_antigravity-${VERSION}-py3-none-${PLATFORM}.whl"
 
 echo "Downloading wheel from: ${DOWNLOAD_URL}"
-curl -sSL -o "${WHEEL_FILE}" "${DOWNLOAD_URL}"
+if ! curl -sSLf -o "${WHEEL_FILE}" "${DOWNLOAD_URL}"; then
+    echo "ERROR: Failed to download the localharness wheel for platform '${PLATFORM}'."
+    echo "This platform version may not be supported or published on PyPI."
+    exit 1
+fi
 
 echo "Extracting localharness binary..."
 # Extract just the binary from the wheel (which is a standard ZIP file)
