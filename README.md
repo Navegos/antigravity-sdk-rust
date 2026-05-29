@@ -38,6 +38,14 @@ The Google Antigravity SDK is a Rust library for building AI agents powered by A
      ```
      The Rust SDK will automatically locate the binary inside the Python package installation directory fallback.
 
+   > **⚠️ Platform Support Note:**
+   > The upstream `google-antigravity` package on PyPI currently provides wheels for:
+   > - macOS Apple Silicon (arm64) ✅
+   > - Linux x86_64 ✅
+   > - Linux aarch64 ✅
+   >
+   > **Intel (x86_64) macOS is not supported** — no valid wheel is published. If you are on an Intel Mac, use a Linux VM/container or an Apple Silicon machine instead.
+
 ## Quickstart
 
 Get started by setting your API key and running the `hello_world` example:
