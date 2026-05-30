@@ -15,7 +15,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let binary_path = if let Ok(path) = std::env::var("ANTIGRAVITY_HARNESS_PATH") {
         path
     } else {
-        let p = std::path::Path::new("bin/localharness");
+        let binary_name = if cfg!(target_os = "windows") {
+            "bin/localharness.exe"
+        } else {
+            "bin/localharness"
+        };
+        let p = std::path::Path::new(binary_name);
         if p.exists() {
             p.to_string_lossy().into_owned()
         } else {
