@@ -44,7 +44,11 @@ The Google Antigravity SDK is a Rust library for building AI agents powered by A
    > - Linux x86_64 ✅
    > - Linux aarch64 ✅
    >
-   > **Intel (x86_64) macOS is not supported** — no valid wheel is published. If you are on an Intel Mac, use a Linux VM/container or an Apple Silicon machine instead.
+   > The following platforms are **not supported** — no wheels are published:
+   > - Intel (x86_64) macOS ❌
+   > - Windows (x86_64 and ARM64) ❌
+   >
+   > If you are on an unsupported platform, use a Linux VM/container or an Apple Silicon Mac instead.
 
 ## Quickstart
 
