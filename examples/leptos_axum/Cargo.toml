@@ -30,7 +30,7 @@ tower-http = { version = "0.6", features = ["fs"], optional = true }
 http = { version = "1", optional = true }
 
 # Hydrate-only dependencies
-wasm-bindgen = { version = "=0.2.103", optional = true }
+wasm-bindgen = { version = "=0.2.114", optional = true }
 web-sys = { version = "0.3", features = ["Storage", "Window"], optional = true }
 
 [workspace]
