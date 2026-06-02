@@ -84,10 +84,39 @@ async fn main() -> Result<(), anyhow::Error> {
 
 ## Interactive Chat Loop
 
-> [!NOTE]
-> Unlike the Python SDK, which includes a prebuilt `run_interactive_loop()` helper, the Rust SDK encourages implementing your own console loop using standard prompt readings.
+The Rust SDK includes a prebuilt `run_interactive_loop()` helper in the `interactive` module to quickly run a console session.
 
-Here is how you can implement an interactive terminal loop:
+Here is how you can run the prebuilt interactive loop:
+
+```rust
+use antigravity_sdk_rust::agent::{Agent, AgentConfig};
+use antigravity_sdk_rust::interactive::run_interactive_loop;
+use antigravity_sdk_rust::policy;
+use antigravity_sdk_rust::types::GeminiConfig;
+
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    let mut config = AgentConfig::default();
+    
+    let mut gemini_config = GeminiConfig::default();
+    gemini_config.models.default.name = "gemini-3.5-flash".to_string();
+    config.gemini_config = gemini_config;
+    config.policies = Some(vec![policy::allow_all()]);
+
+    let mut agent = Agent::new(config);
+    agent.start().await?;
+
+    // Runs a full interactive REPL loop in the terminal
+    run_interactive_loop(&agent).await?;
+
+    agent.stop().await?;
+    Ok(())
+}
+```
+
+### Custom Console Loop (Alternative)
+
+If you need full control over the inputs, prompt format, or error handling, you can implement your own custom console loop using standard prompt readings:
 
 ```rust
 use antigravity_sdk_rust::agent::{Agent, AgentConfig};
