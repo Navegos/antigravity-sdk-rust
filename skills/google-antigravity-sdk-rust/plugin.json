@@ -1,0 +1,16 @@
+{
+  "name": "google-antigravity-sdk-rust",
+  "version": "0.1.14",
+  "description": "Using the Google Antigravity Rust SDK to build AI agents in Rust",
+  "author": {
+    "name": "Google"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "antigravity",
+    "sdk",
+    "agents",
+    "gemini",
+    "rust"
+  ]
+}
